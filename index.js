@@ -23,6 +23,11 @@ app.use(express.json());
 app.use(cors());
 
 // Supabase Connection
+if (!process.env.DATABASE_URL) {
+  console.error('ERRO CRÍTICO: DATABASE_URL não definida nas variáveis de ambiente!');
+  process.exit(1);
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
