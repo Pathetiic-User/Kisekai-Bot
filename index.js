@@ -1,4 +1,8 @@
 require('dotenv').config();
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 const { 
   Client, 
   GatewayIntentBits, 
@@ -415,4 +419,7 @@ const PORT = process.env.PORT || 3001;
 initDb().then(() => {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   client.login(process.env.DISCORD_TOKEN);
+}).catch(err => {
+  console.error('Failed to initialize database:', err);
+  process.exit(1);
 });
