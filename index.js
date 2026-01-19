@@ -39,9 +39,21 @@ try {
     prefix: "!",
     messages: {},
     antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
-    punishChats: []
+    punishChats: [],
+    customEmbeds: {
+      welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
+      warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
+    }
   };
   fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
+}
+
+// Ensure customEmbeds exists
+if (!config.customEmbeds) {
+  config.customEmbeds = {
+    welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
+    warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
+  };
 }
 
 let logs;
@@ -99,12 +111,31 @@ async function logToChannel(guild, type, description) {
   }
 }
 
+function createCustomEmbed(data, placeholders = {}) {
+  let description = data.description || "";
+  for (const [k, v] of Object.entries(placeholders)) {
+    description = description.replace(new RegExp(`{${k}}`, 'g'), v);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(data.title || "Bot Message")
+    .setDescription(description)
+    .setColor(data.color || "#7289da");
+  
+  if (data.footer) embed.setFooter({ text: data.footer });
+  if (data.image) embed.setImage(data.image);
+  if (data.thumbnail) embed.setThumbnail(data.thumbnail);
+  
+  return embed;
+}
+
 client.on('ready', () => {
   console.log(`Logged in as ${client.user.tag}!`);
 });
 
-// Auto-role on join
+// Auto-role and Welcome on join
 client.on('guildMemberAdd', async member => {
+  // Auto-role
   if (config.autoRole) {
     const role = member.guild.roles.cache.get(config.autoRole);
     if (role) {
@@ -114,6 +145,20 @@ client.on('guildMemberAdd', async member => {
       } catch (err) {
         console.error('Error adding auto-role:', err);
       }
+    }
+  }
+
+  // Welcome Embed
+  if (config.customEmbeds?.welcome?.enabled && config.customEmbeds.welcome.channel) {
+    const channel = member.guild.channels.cache.get(config.customEmbeds.welcome.channel);
+    if (channel) {
+      const embed = createCustomEmbed(config.customEmbeds.welcome, {
+        user: member.user.toString(),
+        username: member.user.username,
+        guild: member.guild.name,
+        memberCount: member.guild.memberCount.toString()
+      });
+      channel.send({ embeds: [embed] }).catch(console.error);
     }
   }
 });
@@ -141,7 +186,16 @@ client.on('messageCreate', async message => {
           if (config.antiSpam.action === 'mute') {
             const duration = ms(config.antiSpam.muteTime || '10m');
             await message.member.timeout(duration, 'Auto-Mod: Anti-Spam');
-            message.channel.send(`${message.author}, você foi mutado por spam.`);
+            
+            if (config.customEmbeds?.warmute?.enabled) {
+              const embed = createCustomEmbed(config.customEmbeds.warmute, {
+                user: message.author.toString(),
+                duration: config.antiSpam.muteTime || '10m'
+              });
+              message.channel.send({ embeds: [embed] });
+            } else {
+              message.channel.send(`${message.author}, você foi mutado por spam.`);
+            }
           } else if (config.antiSpam.action === 'kick') {
             await message.member.kick('Auto-Mod: Anti-Spam');
           }
@@ -160,7 +214,7 @@ client.on('messageCreate', async message => {
   const args = message.content.slice(config.prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // Custom Builder Command (Mantido conforme solicitado)
+  // Custom Builder Command
   if (command === 'builder' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
     const jsonStr = message.content.slice(config.prefix.length + command.length).trim();
     if (!jsonStr) return message.reply('Por favor, forneça o JSON da mensagem (estilo Discohook).');
@@ -203,26 +257,39 @@ app.post('/api/config', (req, res) => {
   res.json({ message: 'Config updated successfully', config });
 });
 
-app.get('/api/logs', (req, res) => res.json(logs));
+app.get('/api/logs', (req, res) => {
+  const formattedLogs = [];
+  for (const [userId, userLogs] of Object.entries(logs)) {
+    userLogs.forEach(log => {
+      formattedLogs.push({
+        ...log,
+        userId,
+        id: Math.random().toString(36).substr(2, 9)
+      });
+    });
+  }
+  res.json(formattedLogs);
+});
 
 app.get('/api/stats', (req, res) => {
   res.json({
-    guilds: client.guilds.cache.size,
-    users: client.users.cache.size,
+    servers: client.guilds.cache.size,
+    users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
     uptime: client.uptime,
-    ready: client.isReady()
+    commands: 1 // help builder etc
   });
 });
 
 // Moderation API Endpoints
 app.post('/api/moderate/:action', async (req, res) => {
   const { action } = req.params;
-  const { guildId, userId, reason, duration, moderator } = req.body;
+  const { userId, reason, duration, moderator } = req.body;
+  const guildId = client.guilds.cache.first()?.id; // Usando a primeira guild como padrão se não enviada
 
-  if (!guildId || !userId) return res.status(400).json({ error: 'Missing guildId or userId' });
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   try {
-    const guild = client.guilds.cache.get(guildId);
+    const guild = client.guilds.cache.get(req.body.guildId || guildId);
     if (!guild) return res.status(404).json({ error: 'Guild not found' });
 
     const member = await guild.members.fetch(userId).catch(() => null);
@@ -264,7 +331,7 @@ app.post('/api/moderate/:action', async (req, res) => {
 
       case 'punish':
         if (!member) return res.status(400).json({ error: 'Member not in guild' });
-        for (const channelId of config.punishChats) {
+        for (const channelId of (config.punishChats || [])) {
           const channel = guild.channels.cache.get(channelId);
           if (channel) {
             await channel.permissionOverwrites.edit(member, {
@@ -279,7 +346,7 @@ app.post('/api/moderate/:action', async (req, res) => {
 
       case 'unpunish':
         if (!member) return res.status(400).json({ error: 'Member not in guild' });
-        for (const channelId of config.punishChats) {
+        for (const channelId of (config.punishChats || [])) {
           const channel = guild.channels.cache.get(channelId);
           if (channel) {
             await channel.permissionOverwrites.delete(member);
@@ -301,7 +368,7 @@ app.post('/api/moderate/:action', async (req, res) => {
   }
 });
 
-// Broadcast/Builder API (To allow dashboard to send messages)
+// Broadcast/Builder API
 app.post('/api/broadcast', async (req, res) => {
   const { channelId, message, embed } = req.body;
   if (!channelId || (!message && !embed)) return res.status(400).json({ error: 'Missing parameters' });
@@ -330,7 +397,7 @@ app.post('/api/restart', (req, res) => {
   }, 1000);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`API Server running on port ${PORT}`);
 });
