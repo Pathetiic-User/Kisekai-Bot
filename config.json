@@ -1,0 +1,32 @@
+{
+  "prefix": "!",
+  "autoRole": "",
+  "logChannel": "1462589622294020298",
+  "punishChats": [],
+  "antiSpam": {
+    "enabled": true,
+    "limit": 5,
+    "interval": 5000,
+    "autoPunish": true,
+    "action": "mute",
+    "muteTime": "10m"
+  },
+  "reportChannel": "1462591682854916309",
+  "dashboardUrl": "http://localhost:3000/api/reports",
+  "messages": {
+    "reportSuccess": "Sua denúncia foi enviada com sucesso e será analisada pela staff.",
+    "reportError": "Ocorreu um erro ao enviar sua denúncia.",
+    "noPermission": "Você não tem permissão para usar este comando.",
+    "userNotFound": "Usuário não encontrado.",
+    "invalidUsage": "Uso incorreto do comando.",
+    "prefixUpdated": "Prefix atualizado para: {prefix}",
+    "autoRoleSet": "Auto-role configurado para: {role}",
+    "logsSet": "Canal de logs configurado para: {channel}",
+    "reportsSet": "Canal de denúncias configurado para: {channel}",
+    "punishChatsUpdated": "Chats de punição atualizados.",
+    "muteSuccess": "Muted {user} por {duration}.",
+    "kickSuccess": "Kicked {user} do servidor.",
+    "banSuccess": "Banned {user}{duration}.",
+    "warnSuccess": "Warned {user}."
+  }
+}
