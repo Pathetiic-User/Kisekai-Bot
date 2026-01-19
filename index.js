@@ -227,6 +227,10 @@ client.on('messageCreate', async message => {
       message.reply('Erro ao processar JSON: ' + err.message);
     }
   }
+
+  if (command === 'uptime') {
+    message.reply(`O bot está online há: **${ms(client.uptime, { long: true })}**`);
+  }
 });
 
 // Interaction Handler
@@ -276,6 +280,7 @@ app.get('/api/stats', (req, res) => {
     servers: client.guilds.cache.size,
     users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
     uptime: client.uptime,
+    uptimeFormatted: ms(client.uptime, { long: true }),
     commands: 1 // help builder etc
   });
 });
