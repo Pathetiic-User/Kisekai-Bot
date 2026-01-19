@@ -379,7 +379,7 @@ app.post('/api/broadcast', async (req, res) => {
 
     const payload = {};
     if (message) payload.content = message;
-    if (embed) payload.embeds = [new EmbedBuilder(embed)];
+    if (embed) payload.embeds = [createCustomEmbed(embed)];
 
     await channel.send(payload);
     res.json({ success: true });
