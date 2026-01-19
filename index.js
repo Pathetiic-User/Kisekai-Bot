@@ -16,10 +16,17 @@ const fs = require('fs');
 const ms = require('ms');
 const express = require('express');
 const cors = require('cors');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// Supabase Connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 const client = new Client({
   intents: [
@@ -31,66 +38,71 @@ const client = new Client({
   ]
 });
 
-let config;
-try {
-  config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-} catch (err) {
-  config = {
-    prefix: "!",
-    messages: {},
-    antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
-    punishChats: [],
-    customEmbeds: {
-      welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
-      warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
-    }
-  };
-  fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
-}
-
-// Ensure customEmbeds exists
-if (!config.customEmbeds) {
-  config.customEmbeds = {
-    welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
-    warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
-  };
-}
-
-let logs;
-try {
-  logs = JSON.parse(fs.readFileSync('./logs.json', 'utf8'));
-} catch (err) {
-  logs = {};
-  fs.writeFileSync('./logs.json', JSON.stringify(logs, null, 2));
-}
-
+let config = {};
 const spamMap = new Map();
 
-function saveConfig() {
-  fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
+// Database Initialization
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS configs (
+        id SERIAL PRIMARY KEY,
+        data JSONB NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS logs (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        reason TEXT,
+        moderator TEXT,
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS templates (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        data JSONB NOT NULL
+      );
+    `);
+
+    const res = await client.query('SELECT data FROM configs LIMIT 1');
+    if (res.rows.length === 0) {
+      config = {
+        prefix: "!",
+        messages: {},
+        antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
+        punishChats: [],
+        customEmbeds: {
+          welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
+          warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
+        }
+      };
+      await client.query('INSERT INTO configs (data) VALUES ($1)', [config]);
+    } else {
+      config = res.rows[0].data;
+    }
+  } finally {
+    client.release();
+  }
 }
 
-function saveLogs() {
-  fs.writeFileSync('./logs.json', JSON.stringify(logs, null, 2));
+async function saveConfig() {
+  await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
+}
+
+async function addLog(userId, action, reason, moderator) {
+  await pool.query(
+    'INSERT INTO logs (user_id, action, reason, moderator) VALUES ($1, $2, $3, $4)',
+    [userId, action, reason, moderator]
+  );
 }
 
 function getMessage(key, placeholders = {}) {
-  let msg = config.messages[key] || "Message not found.";
+  let msg = config.messages?.[key] || "Message not found.";
   for (const [k, v] of Object.entries(placeholders)) {
     msg = msg.replace(`{${k}}`, v);
   }
   return msg;
-}
-
-function addLog(userId, action, reason, moderator) {
-  if (!logs[userId]) logs[userId] = [];
-  logs[userId].push({
-    action,
-    reason,
-    moderator,
-    timestamp: new Date().toISOString()
-  });
-  saveLogs();
 }
 
 async function logToChannel(guild, type, description) {
@@ -112,20 +124,56 @@ async function logToChannel(guild, type, description) {
 }
 
 function createCustomEmbed(data, placeholders = {}) {
-  let description = data.description || "";
-  for (const [k, v] of Object.entries(placeholders)) {
-    description = description.replace(new RegExp(`{${k}}`, 'g'), v);
+  const embed = new EmbedBuilder();
+  
+  const replacePlaceholders = (str) => {
+    if (typeof str !== 'string') return str;
+    let newStr = str;
+    for (const [k, v] of Object.entries(placeholders)) {
+      newStr = newStr.replace(new RegExp(`{${k}}`, 'g'), v);
+    }
+    return newStr;
+  };
+
+  if (data.title) embed.setTitle(replacePlaceholders(data.title));
+  if (data.description) embed.setDescription(replacePlaceholders(data.description));
+  if (data.url) embed.setURL(data.url);
+  if (data.color) {
+    try {
+      embed.setColor(data.color);
+    } catch (e) {
+      embed.setColor("#7289da");
+    }
+  }
+  if (data.timestamp) embed.setTimestamp(data.timestamp === true ? new Date() : new Date(data.timestamp));
+
+  if (data.author) {
+    embed.setAuthor({
+      name: replacePlaceholders(data.author.name || ""),
+      iconURL: data.author.icon_url || data.author.iconURL,
+      url: data.author.url
+    });
   }
 
-  const embed = new EmbedBuilder()
-    .setTitle(data.title || "Bot Message")
-    .setDescription(description)
-    .setColor(data.color || "#7289da");
-  
-  if (data.footer) embed.setFooter({ text: data.footer });
-  if (data.image) embed.setImage(data.image);
-  if (data.thumbnail) embed.setThumbnail(data.thumbnail);
-  
+  if (data.footer) {
+    embed.setFooter({
+      text: replacePlaceholders(data.footer.text || ""),
+      iconURL: data.footer.icon_url || data.footer.iconURL
+    });
+  }
+
+  if (data.image) embed.setImage(typeof data.image === 'string' ? data.image : data.image.url);
+  if (data.thumbnail) embed.setThumbnail(typeof data.thumbnail === 'string' ? data.thumbnail : data.thumbnail.url);
+
+  if (data.fields && Array.isArray(data.fields)) {
+    const formattedFields = data.fields.map(f => ({
+      name: replacePlaceholders(f.name || "\u200b"),
+      value: replacePlaceholders(f.value || "\u200b"),
+      inline: !!f.inline
+    }));
+    embed.addFields(formattedFields);
+  }
+
   return embed;
 }
 
@@ -135,20 +183,18 @@ client.on('ready', () => {
 
 // Auto-role and Welcome on join
 client.on('guildMemberAdd', async member => {
-  // Auto-role
   if (config.autoRole) {
     const role = member.guild.roles.cache.get(config.autoRole);
     if (role) {
       try {
         await member.roles.add(role);
-        logToChannel(member.guild, 'Auto-Role', `Added auto-role to ${member.user.tag}`);
+        await logToChannel(member.guild, 'Auto-Role', `Added auto-role to ${member.user.tag}`);
       } catch (err) {
         console.error('Error adding auto-role:', err);
       }
     }
   }
 
-  // Welcome Embed
   if (config.customEmbeds?.welcome?.enabled && config.customEmbeds.welcome.channel) {
     const channel = member.guild.channels.cache.get(config.customEmbeds.welcome.channel);
     if (channel) {
@@ -167,8 +213,7 @@ client.on('guildMemberAdd', async member => {
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  // Anti-Spam Logic
-  if (config.antiSpam && config.antiSpam.enabled && !message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+  if (config.antiSpam && config.antiSpam.enabled && !message.member?.permissions.has(PermissionFlagsBits.ManageMessages)) {
     const now = Date.now();
     const userData = spamMap.get(message.author.id) || { count: 0, lastMessageTime: now };
     
@@ -199,8 +244,8 @@ client.on('messageCreate', async message => {
           } else if (config.antiSpam.action === 'kick') {
             await message.member.kick('Auto-Mod: Anti-Spam');
           }
-          addLog(message.author.id, 'Auto-Punish (Spam)', `Action: ${config.antiSpam.action}`, 'System');
-          logToChannel(message.guild, 'Auto-Mod', `User: ${message.author.tag} punished for spamming.\nAction: ${config.antiSpam.action}`);
+          await addLog(message.author.id, 'Auto-Punish (Spam)', `Action: ${config.antiSpam.action}`, 'System');
+          await logToChannel(message.guild, 'Auto-Mod', `User: ${message.author.tag} punished for spamming.\nAction: ${config.antiSpam.action}`);
         } catch (err) {
           console.error('Anti-spam punishment failed:', err);
         }
@@ -214,8 +259,7 @@ client.on('messageCreate', async message => {
   const args = message.content.slice(config.prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // Custom Builder Command
-  if (command === 'builder' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+  if (command === 'builder' && message.member?.permissions.has(PermissionFlagsBits.Administrator)) {
     const jsonStr = message.content.slice(config.prefix.length + command.length).trim();
     if (!jsonStr) return message.reply('Por favor, forneça o JSON da mensagem (estilo Discohook).');
 
@@ -251,28 +295,23 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// API Endpoints for Dashboard Integration
+// API Endpoints
 app.get('/api/config', (req, res) => res.json(config));
 
-app.post('/api/config', (req, res) => {
+app.post('/api/config', async (req, res) => {
   if (!req.body) return res.status(400).json({ error: 'No data provided' });
   config = { ...config, ...req.body };
-  saveConfig();
+  await saveConfig();
   res.json({ message: 'Config updated successfully', config });
 });
 
-app.get('/api/logs', (req, res) => {
-  const formattedLogs = [];
-  for (const [userId, userLogs] of Object.entries(logs)) {
-    userLogs.forEach(log => {
-      formattedLogs.push({
-        ...log,
-        userId,
-        id: Math.random().toString(36).substr(2, 9)
-      });
-    });
+app.get('/api/logs', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM logs ORDER BY timestamp DESC LIMIT 100');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(formattedLogs);
 });
 
 app.get('/api/stats', (req, res) => {
@@ -281,15 +320,14 @@ app.get('/api/stats', (req, res) => {
     users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
     uptime: client.uptime,
     uptimeFormatted: ms(client.uptime, { long: true }),
-    commands: 1 // help builder etc
+    commands: 2 // help, builder, uptime
   });
 });
 
-// Moderation API Endpoints
 app.post('/api/moderate/:action', async (req, res) => {
   const { action } = req.params;
   const { userId, reason, duration, moderator } = req.body;
-  const guildId = client.guilds.cache.first()?.id; // Usando a primeira guild como padrão se não enviada
+  const guildId = client.guilds.cache.first()?.id;
 
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
@@ -303,89 +341,43 @@ app.post('/api/moderate/:action', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     let actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
-    let successMessage = `User ${user.tag} was ${action}ed.`;
-
+    
     switch (action) {
       case 'kick':
         if (!member) return res.status(400).json({ error: 'Member not in guild' });
         await member.kick(reason || 'Kicked via Dashboard');
         break;
-
       case 'ban':
         await guild.members.ban(userId, { reason: reason || 'Banned via Dashboard' });
-        if (duration) {
-          const time = ms(duration);
-          if (time) {
-            setTimeout(async () => {
-              await guild.members.unban(userId, 'Temporary ban expired').catch(() => {});
-            }, time);
-          }
-        }
         break;
-
       case 'mute':
         if (!member) return res.status(400).json({ error: 'Member not in guild' });
-        const muteTime = duration ? ms(duration) : ms('10m');
-        await member.timeout(muteTime, reason || 'Muted via Dashboard');
+        await member.timeout(duration ? ms(duration) : ms('10m'), reason || 'Muted via Dashboard');
         break;
-
       case 'warn':
-        addLog(userId, 'Warning', reason || 'Warned via Dashboard', moderator || 'Dashboard');
-        logToChannel(guild, 'Warning', `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
-        return res.json({ success: true, message: `Warned ${user.tag}` });
-
-      case 'punish':
-        if (!member) return res.status(400).json({ error: 'Member not in guild' });
-        for (const channelId of (config.punishChats || [])) {
-          const channel = guild.channels.cache.get(channelId);
-          if (channel) {
-            await channel.permissionOverwrites.edit(member, {
-              ViewChannel: false,
-              SendMessages: false,
-              Connect: false
-            });
-          }
-        }
-        actionLabel = 'Punishment (Restrict)';
+        actionLabel = 'Warning';
         break;
-
-      case 'unpunish':
-        if (!member) return res.status(400).json({ error: 'Member not in guild' });
-        for (const channelId of (config.punishChats || [])) {
-          const channel = guild.channels.cache.get(channelId);
-          if (channel) {
-            await channel.permissionOverwrites.delete(member);
-          }
-        }
-        break;
-
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
 
-    addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard');
-    logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}${duration ? `\nDuration: ${duration}` : ''}`);
-
-    res.json({ success: true, message: successMessage });
+    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard');
+    await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
+    res.json({ success: true });
   } catch (err) {
-    console.error(`Moderation error (${action}):`, err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Broadcast/Builder API
 app.post('/api/broadcast', async (req, res) => {
-  const { channelId, message, embed } = req.body;
-  if (!channelId || (!message && !embed)) return res.status(400).json({ error: 'Missing parameters' });
+  const { channelId, content, embeds } = req.body;
+  if (!channelId) return res.status(400).json({ error: 'Missing channelId' });
 
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return res.status(404).json({ error: 'Channel not found' });
 
-    const payload = {};
-    if (message) payload.content = message;
-    if (embed) payload.embeds = [createCustomEmbed(embed)];
-
+    const payload = { content, embeds: embeds?.map(e => createCustomEmbed(e)) };
     await channel.send(payload);
     res.json({ success: true });
   } catch (err) {
@@ -393,18 +385,29 @@ app.post('/api/broadcast', async (req, res) => {
   }
 });
 
-// Restart API Endpoint
+app.get('/api/templates', async (req, res) => {
+  const result = await pool.query('SELECT * FROM templates');
+  res.json(result.rows);
+});
+
+app.post('/api/templates', async (req, res) => {
+  const { name, data } = req.body;
+  const result = await pool.query('INSERT INTO templates (name, data) VALUES ($1, $2) RETURNING *', [name, data]);
+  res.json(result.rows[0]);
+});
+
+app.delete('/api/templates/:id', async (req, res) => {
+  await pool.query('DELETE FROM templates WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
 app.post('/api/restart', (req, res) => {
-  res.json({ message: 'Restarting bot...' });
-  console.log('Restart triggered via API. Exiting process...');
-  setTimeout(() => {
-    process.exit(0);
-  }, 1000);
+  res.json({ message: 'Restarting...' });
+  setTimeout(() => process.exit(0), 1000);
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`API Server running on port ${PORT}`);
+initDb().then(() => {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  client.login(process.env.DISCORD_TOKEN);
 });
-
-client.login(process.env.DISCORD_TOKEN);
