@@ -31,8 +31,26 @@ const client = new Client({
   ]
 });
 
-let config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-let logs = JSON.parse(fs.readFileSync('./logs.json', 'utf8'));
+let config;
+try {
+  config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+} catch (err) {
+  config = {
+    prefix: "!",
+    messages: {},
+    antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
+    punishChats: []
+  };
+  fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
+}
+
+let logs;
+try {
+  logs = JSON.parse(fs.readFileSync('./logs.json', 'utf8'));
+} catch (err) {
+  logs = {};
+  fs.writeFileSync('./logs.json', JSON.stringify(logs, null, 2));
+}
 
 // Anti-spam tracker: Map<userId, { count, lastMessageTime }>
 const spamMap = new Map();
