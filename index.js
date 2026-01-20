@@ -72,6 +72,14 @@ async function initDb() {
         name TEXT NOT NULL,
         data JSONB NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS reports (
+        id SERIAL PRIMARY KEY,
+        reporter_id TEXT NOT NULL,
+        reported_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        image_url TEXT,
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     const res = await client.query('SELECT data FROM configs LIMIT 1');
@@ -81,9 +89,12 @@ async function initDb() {
         messages: {},
         antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
         punishChats: [],
+        reportChannel: "",
+        punishmentChannel: "",
         customEmbeds: {
           welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
-          warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" }
+          warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" },
+          reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" }
         }
       };
       await client.query('INSERT INTO configs (data) VALUES ($1)', [config]);
@@ -186,8 +197,43 @@ function createCustomEmbed(data, placeholders = {}) {
   return embed;
 }
 
-client.on('ready', () => {
+client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
+  
+  // Register Slash Commands
+  const commands = [
+    {
+      name: 'reportar',
+      description: 'Reporta um usuário por má conduta',
+      options: [
+        {
+          name: 'usuario',
+          type: 6, // USER
+          description: 'O usuário que você deseja reportar',
+          required: true
+        },
+        {
+          name: 'motivo',
+          type: 3, // STRING
+          description: 'O motivo do reporte',
+          required: true
+        },
+        {
+          name: 'prova',
+          type: 11, // ATTACHMENT
+          description: 'Imagem ou vídeo provando a conduta',
+          required: true
+        }
+      ]
+    }
+  ];
+
+  try {
+    await client.application.commands.set(commands);
+    console.log('Slash commands registered!');
+  } catch (err) {
+    console.error('Error registering slash commands:', err);
+  }
 });
 
 // Auto-role and Welcome on join
@@ -271,6 +317,39 @@ client.on('messageCreate', async message => {
 
 // Interaction Handler
 client.on('interactionCreate', async interaction => {
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === 'reportar') {
+      if (config.reportChannel && interaction.channelId !== config.reportChannel) {
+        return interaction.reply({ content: `Este comando só pode ser usado no canal <#${config.reportChannel}>`, ephemeral: true });
+      }
+
+      const reportedUser = interaction.options.getUser('usuario');
+      const reason = interaction.options.getString('motivo');
+      const attachment = interaction.options.getAttachment('prova');
+
+      try {
+        await pool.query(
+          'INSERT INTO reports (reporter_id, reported_id, reason, image_url) VALUES ($1, $2, $3, $4)',
+          [interaction.user.id, reportedUser.id, reason, attachment.url]
+        );
+
+        const embed = createCustomEmbed(config.customEmbeds.reportFeedback || {
+          title: "Reporte Enviado",
+          description: `Seu reporte contra ${reportedUser.toString()} foi recebido com sucesso.`,
+          color: "#ffff00"
+        }, {
+          user: reportedUser.toString(),
+          username: reportedUser.username
+        });
+
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      } catch (err) {
+        console.error('Report error:', err);
+        await interaction.reply({ content: 'Ocorreu um erro ao processar seu reporte.', ephemeral: true });
+      }
+    }
+  }
+
   if (interaction.isButton()) {
     if (interaction.customId === 'btn_info') {
       await interaction.reply({ content: 'Este é um bot multifuncional desenvolvido para Kisekai.', ephemeral: true });
@@ -345,9 +424,18 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+app.get('/api/reports', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM reports ORDER BY timestamp DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/moderate/:action', async (req, res) => {
   const { action } = req.params;
-  const { userId, reason, duration, moderator } = req.body;
+  const { userId, reason, duration, moderator, evidenceUrl, reporterId } = req.body;
   const guildId = client.guilds.cache.first()?.id;
 
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
@@ -383,7 +471,31 @@ app.post('/api/moderate/:action', async (req, res) => {
     }
 
     await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard');
+    
+    // Log to standard channel
     await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
+
+    // Log to Punishments Channel
+    if (config.punishmentChannel) {
+      const punChannel = guild.channels.cache.get(config.punishmentChannel);
+      if (punChannel) {
+        const punEmbed = new EmbedBuilder()
+          .setTitle(`⚖️ Nova Punição: ${actionLabel}`)
+          .addFields(
+            { name: '👤 Punido', value: `${user.tag} (${userId})`, inline: true },
+            { name: '🛡️ Moderador', value: moderator || 'Dashboard', inline: true },
+            { name: '📝 Motivo', value: reason || 'Não informado' },
+            { name: '⏳ Tempo/Duração', value: duration || 'N/A', inline: true },
+            { name: '🚩 Reportado por', value: reporterId ? `<@${reporterId}>` : 'N/A', inline: true }
+          )
+          .setColor(0xff0000)
+          .setTimestamp();
+
+        if (evidenceUrl) punEmbed.setImage(evidenceUrl);
+        await punChannel.send({ embeds: [punEmbed] });
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -418,8 +530,11 @@ app.delete('/api/templates/:id', async (req, res) => {
 });
 
 app.post('/api/restart', (req, res) => {
-  res.json({ message: 'Restarting...' });
-  setTimeout(() => process.exit(0), 1000);
+  res.status(200).json({ message: 'Reiniciando o bot...' });
+  console.log('Comando de reinicialização recebido. Encerrando em 2 segundos...');
+  setTimeout(() => {
+    process.exit(1); // Saída com erro para forçar o Railway a reiniciar
+  }, 2000);
 });
 
 const PORT = process.env.PORT || 3001;
