@@ -78,8 +78,21 @@ async function initDb() {
         reported_id TEXT NOT NULL,
         reason TEXT NOT NULL,
         image_url TEXT,
+        status TEXT DEFAULT 'pending',
+        deleted_at TIMESTAMPTZ,
         timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Migration for existing tables
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='status') THEN
+          ALTER TABLE reports ADD COLUMN status TEXT DEFAULT 'pending';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='deleted_at') THEN
+          ALTER TABLE reports ADD COLUMN deleted_at TIMESTAMPTZ;
+        END IF;
+      END $$;
     `);
 
     const res = await client.query('SELECT data FROM configs LIMIT 1');
@@ -101,6 +114,18 @@ async function initDb() {
     } else {
       config = res.rows[0].data;
     }
+
+    // Limpeza periódica de reportes (30 dias na lixeira)
+    await client.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
+    setInterval(async () => {
+      try {
+        await pool.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
+        console.log('Limpeza de lixeira de reportes concluída.');
+      } catch (err) {
+        console.error('Erro na limpeza da lixeira:', err);
+      }
+    }, 24 * 60 * 60 * 1000); // A cada 24 horas
+
   } finally {
     client.release();
   }
@@ -200,7 +225,16 @@ function createCustomEmbed(data, placeholders = {}) {
 client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
   
-  // Register Slash Commands
+  // Security: Leave unauthorized guilds
+  const authorizedGuildId = "1438658038612623534";
+  client.guilds.cache.forEach(guild => {
+    if (guild.id !== authorizedGuildId) {
+      console.log(`Saindo de servidor não autorizado: ${guild.name} (${guild.id})`);
+      guild.leave();
+    }
+  });
+
+  // Register Slash Commands... (mantendo o resto igual)
   const commands = [
     {
       name: 'reportar',
@@ -233,6 +267,14 @@ client.on('ready', async () => {
     console.log('Slash commands registered!');
   } catch (err) {
     console.error('Error registering slash commands:', err);
+  }
+});
+
+// Security: Block joining new guilds
+client.on('guildCreate', guild => {
+  if (guild.id !== "1438658038612623534") {
+    console.log(`Tentativa de entrada em servidor não autorizado: ${guild.name}`);
+    guild.leave();
   }
 });
 
@@ -319,7 +361,11 @@ client.on('messageCreate', async message => {
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === 'reportar') {
-      if (config.reportChannel && interaction.channelId !== config.reportChannel) {
+      if (!config.reportChannel) {
+        return interaction.reply({ content: "O sistema de reportes não está configurado. Por favor, configure um canal no dashboard.", ephemeral: true });
+      }
+
+      if (interaction.channelId !== config.reportChannel) {
         return interaction.reply({ content: `Este comando só pode ser usado no canal <#${config.reportChannel}>`, ephemeral: true });
       }
 
@@ -426,8 +472,111 @@ app.get('/api/stats', (req, res) => {
 
 app.get('/api/reports', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM reports ORDER BY timestamp DESC');
-    res.json(result.rows);
+    const { status } = req.query;
+    let query = 'SELECT * FROM reports';
+    const params = [];
+
+    if (status) {
+      params.push(status);
+      query += ' WHERE status = $1';
+    } else {
+      query += " WHERE status != 'deleted'";
+    }
+
+    query += ' ORDER BY timestamp DESC';
+    const result = await pool.query(query, params);
+    
+    const reportsWithDetails = await Promise.all(result.rows.map(async (report) => {
+      const reporter = await client.users.fetch(report.reporter_id).catch(() => null);
+      const reported = await client.users.fetch(report.reported_id).catch(() => null);
+
+      return {
+        ...report,
+        reporter: reporter ? {
+          username: reporter.username,
+          avatarURL: reporter.displayAvatarURL(),
+          id: reporter.id
+        } : { username: "Desconhecido", id: report.reporter_id },
+        reported: reported ? {
+          username: reported.username,
+          avatarURL: reported.displayAvatarURL(),
+          id: reported.id
+        } : { username: "Desconhecido", id: report.reported_id }
+      };
+    }));
+
+    res.json(reportsWithDetails);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/reports/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body; // 'pending', 'resolved', 'rejected'
+
+  if (!['pending', 'resolved', 'rejected'].includes(status)) {
+    return res.status(400).json({ error: 'Status inválido' });
+  }
+
+  try {
+    const result = await pool.query(
+      'UPDATE reports SET status = $1 WHERE id = $2 RETURNING *',
+      [status, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Reporte não encontrado' });
+    }
+
+    const report = result.rows[0];
+
+    // Se resolvido, notificar no canal de punidos
+    if (status === 'resolved' && config.punishmentChannel) {
+      const guild = client.guilds.cache.get(config.guildId || "1438658038612623534");
+      if (guild) {
+        const punChannel = guild.channels.cache.get(config.punishmentChannel);
+        if (punChannel) {
+          const reportedUser = await client.users.fetch(report.reported_id).catch(() => null);
+          const reporterUser = await client.users.fetch(report.reporter_id).catch(() => null);
+          
+          const embed = new EmbedBuilder()
+            .setTitle('✅ Reporte Bem-Sucedido')
+            .setDescription(`Um reporte foi analisado e o usuário foi punido.`)
+            .addFields(
+              { name: '👤 Usuário Punido', value: reportedUser ? `${reportedUser.tag}` : report.reported_id, inline: true },
+              { name: '🚩 Motivo', value: report.reason },
+              { name: '🛡️ Status', value: 'Resolvido/Punido', inline: true }
+            )
+            .setColor(0x00ff00)
+            .setTimestamp();
+
+          if (report.image_url) embed.setImage(report.image_url);
+          
+          await punChannel.send({ embeds: [embed] });
+        }
+      }
+    }
+
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/reports/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      "UPDATE reports SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Reporte não encontrado' });
+    }
+
+    res.json({ message: 'Reporte enviado para a lixeira', report: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
