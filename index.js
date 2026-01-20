@@ -267,23 +267,6 @@ client.on('messageCreate', async message => {
 
   const args = message.content.slice(config.prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
-
-  if (command === 'builder' && message.member?.permissions.has(PermissionFlagsBits.Administrator)) {
-    const jsonStr = message.content.slice(config.prefix.length + command.length).trim();
-    if (!jsonStr) return message.reply('Por favor, forneça o JSON da mensagem (estilo Discohook).');
-
-    try {
-      const data = JSON.parse(jsonStr);
-      await message.channel.send(data);
-      if (message.deletable) message.delete().catch(() => {});
-    } catch (err) {
-      message.reply('Erro ao processar JSON: ' + err.message);
-    }
-  }
-
-  if (command === 'uptime') {
-    message.reply(`O bot está online há: **${ms(client.uptime, { long: true })}**`);
-  }
 });
 
 // Interaction Handler
@@ -315,8 +298,37 @@ app.post('/api/config', async (req, res) => {
 });
 
 app.get('/api/logs', async (req, res) => {
+  const { startDate, endDate, limit, offset } = req.query;
   try {
-    const result = await pool.query('SELECT * FROM logs ORDER BY timestamp DESC LIMIT 100');
+    let query = 'SELECT * FROM logs';
+    const params = [];
+    const conditions = [];
+
+    if (startDate) {
+      params.push(startDate);
+      conditions.push(`timestamp >= $${params.length}`);
+    }
+    if (endDate) {
+      params.push(endDate);
+      conditions.push(`timestamp <= $${params.length}`);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY timestamp DESC';
+
+    if (limit) {
+      params.push(parseInt(limit));
+      query += ` LIMIT $${params.length}`;
+    }
+    if (offset) {
+      params.push(parseInt(offset));
+      query += ` OFFSET $${params.length}`;
+    }
+
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -329,7 +341,7 @@ app.get('/api/stats', (req, res) => {
     users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
     uptime: client.uptime,
     uptimeFormatted: ms(client.uptime, { long: true }),
-    commands: 2 // help, builder, uptime
+    lastRestart: new Date(Date.now() - client.uptime).toISOString()
   });
 });
 
@@ -392,11 +404,6 @@ app.post('/api/broadcast', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-app.get('/api/templates', async (req, res) => {
-  const result = await pool.query('SELECT * FROM templates');
-  res.json(result.rows);
 });
 
 app.post('/api/templates', async (req, res) => {
