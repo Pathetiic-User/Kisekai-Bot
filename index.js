@@ -33,7 +33,19 @@ app.use(helmet()); // Proteção de headers
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: function(origin, callback) {
+    const allowedOrigins = [
+      'http://localhost:8080',
+      'https://kisekai-dashboard.vercel.app', // Adicione outros se tiver
+      process.env.FRONTEND_URL
+    ].filter(Boolean);
+    
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
@@ -610,7 +622,8 @@ app.get('/api/auth/callback', async (req, res) => {
     });
 
     // Redirect based on access
-    const redirectUrl = hasAccess ? (process.env.DASHBOARD_URL || '/dashboard') : (process.env.REPORT_PAGE_URL || '/report');
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
+    const redirectUrl = hasAccess ? `${frontendUrl}/` : `${frontendUrl}/support`;
     res.redirect(redirectUrl);
 
   } catch (err) {
@@ -625,7 +638,14 @@ app.get('/api/auth/me', (req, res) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    res.json({ authenticated: true, user: decoded });
+    res.json({ 
+      authenticated: true, 
+      id: decoded.id,
+      username: decoded.username,
+      avatar: decoded.avatar,
+      hasAccess: decoded.hasAccess,
+      role: decoded.role
+    });
   } catch (err) {
     res.status(401).json({ authenticated: false });
   }
