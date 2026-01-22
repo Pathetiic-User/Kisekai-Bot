@@ -23,10 +23,40 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
+app.use(helmet()); // Proteção de headers
 app.use(express.json());
 app.use(cors());
+
+// Limite de requisições: 100 por 15 minutos
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  message: { error: 'Muitas requisições, tente novamente mais tarde.' }
+});
+app.use('/api/', limiter);
+
+// Middleware de Autenticação da API
+const authMiddleware = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  const masterKey = process.env.API_KEY;
+  
+  if (!masterKey) {
+    console.error('ERRO CRÍTICO: API_KEY não definida no arquivo .env!');
+    return res.status(500).json({ error: 'Erro interno de configuração de segurança.' });
+  }
+
+  if (!apiKey || apiKey !== masterKey) {
+    return res.status(401).json({ error: 'Acesso negado: API Key inválida ou ausente.' });
+  }
+  next();
+};
+
+// Aplicar autenticação em todas as rotas de API
+app.use('/api/', authMiddleware);
 
 // Supabase Connection
 if (!process.env.DATABASE_URL) {
