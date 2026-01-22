@@ -21,6 +21,8 @@ const ms = require('ms');
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
@@ -36,6 +38,11 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+const supabase = createClient(
+  process.env.SUPABASE_URL || `https://${process.env.DATABASE_URL.split('@')[1].split('.')[0]}.supabase.co`,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const client = new Client({
   intents: [
@@ -107,7 +114,10 @@ async function initDb() {
         customEmbeds: {
           welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
           warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" },
-          reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" }
+          reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" },
+          resolvedReport: { enabled: true, title: "✅ Reporte Bem-Sucedido", description: "Um reporte foi analisado e o usuário foi punido.", color: "#00ff00", fields: [{ name: "👤 Usuário Punido", value: "{reported_tag}", inline: true }, { name: "🚩 Motivo", value: "{reason}", inline: false }] },
+          punishment: { enabled: true, title: "⚖️ Nova Punição: {action}", color: "#ff0000", fields: [{ name: "👤 Punido", value: "{user_tag}", inline: true }, { name: "🛡️ Moderador", value: "{moderator}", inline: true }, { name: "📝 Motivo", value: "{reason}", inline: false }, { name: "⏳ Duração", value: "{duration}", inline: true }] },
+          logs: { enabled: true, title: "[{type}]", description: "{description}", color: "#ffff00" }
         }
       };
       await client.query('INSERT INTO configs (data) VALUES ($1)', [config]);
@@ -116,15 +126,34 @@ async function initDb() {
     }
 
     // Limpeza periódica de reportes (30 dias na lixeira)
-    await client.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
-    setInterval(async () => {
+    const cleanupReports = async () => {
       try {
+        const { rows: reportsToDelete } = await pool.query(
+          "SELECT image_url FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'"
+        );
+
+        for (const report of reportsToDelete) {
+          if (report.image_url && report.image_url.includes('storage/v1/object/public/reports/')) {
+            const fileName = report.image_url.split('/').pop();
+            await supabase.storage.from('reports').remove([fileName]);
+          }
+        }
+
         await pool.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
         console.log('Limpeza de lixeira de reportes concluída.');
       } catch (err) {
         console.error('Erro na limpeza da lixeira:', err);
       }
-    }, 24 * 60 * 60 * 1000); // A cada 24 horas
+    };
+
+    cleanupReports();
+    setInterval(cleanupReports, 24 * 60 * 60 * 1000); // A cada 24 horas
+
+    // Ensure storage bucket exists
+    const { data: buckets } = await supabase.storage.listBuckets();
+    if (!buckets?.find(b => b.name === 'reports')) {
+      await supabase.storage.createBucket('reports', { public: true });
+    }
 
   } finally {
     client.release();
@@ -151,15 +180,15 @@ function getMessage(key, placeholders = {}) {
 }
 
 async function logToChannel(guild, type, description) {
-  if (!config.logChannel) return;
+  if (!config.logChannel || !config.customEmbeds?.logs?.enabled) return;
   const channel = guild.channels.cache.get(config.logChannel);
   if (!channel) return;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`[${type}]`)
-    .setDescription(description)
-    .setColor(type === 'Ban' || type === 'Kick' ? 0xff0000 : 0xffff00)
-    .setTimestamp();
+  const embed = createCustomEmbed(config.customEmbeds.logs, {
+    type,
+    description,
+    guild: guild.name
+  });
 
   try {
     await channel.send({ embeds: [embed] });
@@ -326,13 +355,13 @@ client.on('messageCreate', async message => {
       if (config.antiSpam.autoPunish) {
         try {
           if (config.antiSpam.action === 'mute') {
-            const duration = ms(config.antiSpam.muteTime || '10m');
-            await message.member.timeout(duration, 'Auto-Mod: Anti-Spam');
+            const duration = config.antiSpam.muteTime || '10m';
+            await message.member.timeout(ms(duration), 'Auto-Mod: Anti-Spam');
             
             if (config.customEmbeds?.warmute?.enabled) {
               const embed = createCustomEmbed(config.customEmbeds.warmute, {
                 user: message.author.toString(),
-                duration: config.antiSpam.muteTime || '10m'
+                duration: duration
               });
               message.channel.send({ embeds: [embed] });
             } else {
@@ -374,9 +403,38 @@ client.on('interactionCreate', async interaction => {
       const attachment = interaction.options.getAttachment('prova');
 
       try {
+        await interaction.deferReply({ ephemeral: true });
+
+        let finalImageUrl = attachment.url;
+
+        // Download and Upload to Supabase
+        try {
+          const response = await axios.get(attachment.url, { responseType: 'arraybuffer' });
+          const fileExt = attachment.name.split('.').pop();
+          const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+          
+          const { error } = await supabase.storage
+            .from('reports')
+            .upload(fileName, response.data, {
+              contentType: attachment.contentType,
+              upsert: false
+            });
+
+          if (error) throw error;
+
+          const { data: { publicUrl } } = supabase.storage
+            .from('reports')
+            .getPublicUrl(fileName);
+          
+          finalImageUrl = publicUrl;
+        } catch (uploadError) {
+          console.error('Error uploading to Supabase:', uploadError);
+          // Fallback to original URL if upload fails
+        }
+
         await pool.query(
           'INSERT INTO reports (reporter_id, reported_id, reason, image_url) VALUES ($1, $2, $3, $4)',
-          [interaction.user.id, reportedUser.id, reason, attachment.url]
+          [interaction.user.id, reportedUser.id, reason, finalImageUrl]
         );
 
         const embed = createCustomEmbed(config.customEmbeds.reportFeedback || {
@@ -388,10 +446,14 @@ client.on('interactionCreate', async interaction => {
           username: reportedUser.username
         });
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('Report error:', err);
-        await interaction.reply({ content: 'Ocorreu um erro ao processar seu reporte.', ephemeral: true });
+        if (interaction.deferred) {
+          await interaction.editReply({ content: 'Ocorreu um erro ao processar seu reporte.' });
+        } else {
+          await interaction.reply({ content: 'Ocorreu um erro ao processar seu reporte.', ephemeral: true });
+        }
       }
     }
   }
@@ -532,24 +594,18 @@ app.patch('/api/reports/:id/status', async (req, res) => {
     const report = result.rows[0];
 
     // Se resolvido, notificar no canal de punidos
-    if (status === 'resolved' && config.punishmentChannel) {
+    if (status === 'resolved' && config.punishmentChannel && config.customEmbeds?.resolvedReport?.enabled) {
       const guild = client.guilds.cache.get(config.guildId || "1438658038612623534");
       if (guild) {
         const punChannel = guild.channels.cache.get(config.punishmentChannel);
         if (punChannel) {
           const reportedUser = await client.users.fetch(report.reported_id).catch(() => null);
-          const reporterUser = await client.users.fetch(report.reporter_id).catch(() => null);
           
-          const embed = new EmbedBuilder()
-            .setTitle('✅ Reporte Bem-Sucedido')
-            .setDescription(`Um reporte foi analisado e o usuário foi punido.`)
-            .addFields(
-              { name: '👤 Usuário Punido', value: reportedUser ? `${reportedUser.tag}` : report.reported_id, inline: true },
-              { name: '🚩 Motivo', value: report.reason },
-              { name: '🛡️ Status', value: 'Resolvido/Punido', inline: true }
-            )
-            .setColor(0x00ff00)
-            .setTimestamp();
+          const embed = createCustomEmbed(config.customEmbeds.resolvedReport, {
+            reported_tag: reportedUser ? reportedUser.tag : report.reported_id,
+            reported_id: report.reported_id,
+            reason: report.reason
+          });
 
           if (report.image_url) embed.setImage(report.image_url);
           
@@ -566,17 +622,38 @@ app.patch('/api/reports/:id/status', async (req, res) => {
 
 app.delete('/api/reports/:id', async (req, res) => {
   const { id } = req.params;
+  const { permanent } = req.query;
+
   try {
-    const result = await pool.query(
-      "UPDATE reports SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *",
-      [id]
-    );
+    if (permanent === 'true') {
+      // Hard delete: delete image from storage and then delete from DB
+      const { rows } = await pool.query('SELECT image_url FROM reports WHERE id = $1', [id]);
+      
+      if (rows.length > 0 && rows[0].image_url && rows[0].image_url.includes('storage/v1/object/public/reports/')) {
+        const fileName = rows[0].image_url.split('/').pop();
+        await supabase.storage.from('reports').remove([fileName]);
+      }
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Reporte não encontrado' });
+      const result = await pool.query('DELETE FROM reports WHERE id = $1 RETURNING *', [id]);
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Reporte não encontrado' });
+      }
+
+      return res.json({ message: 'Reporte deletado permanentemente', report: result.rows[0] });
+    } else {
+      // Soft delete (trash)
+      const result = await pool.query(
+        "UPDATE reports SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *",
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Reporte não encontrado' });
+      }
+
+      return res.json({ message: 'Reporte enviado para a lixeira', report: result.rows[0] });
     }
-
-    res.json({ message: 'Reporte enviado para a lixeira', report: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -625,23 +702,21 @@ app.post('/api/moderate/:action', async (req, res) => {
     await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
 
     // Log to Punishments Channel
-    if (config.punishmentChannel) {
+    if (config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
       const punChannel = guild.channels.cache.get(config.punishmentChannel);
       if (punChannel) {
-        const punEmbed = new EmbedBuilder()
-          .setTitle(`⚖️ Nova Punição: ${actionLabel}`)
-          .addFields(
-            { name: '👤 Punido', value: `${user.tag} (${userId})`, inline: true },
-            { name: '🛡️ Moderador', value: moderator || 'Dashboard', inline: true },
-            { name: '📝 Motivo', value: reason || 'Não informado' },
-            { name: '⏳ Tempo/Duração', value: duration || 'N/A', inline: true },
-            { name: '🚩 Reportado por', value: reporterId ? `<@${reporterId}>` : 'N/A', inline: true }
-          )
-          .setColor(0xff0000)
-          .setTimestamp();
+        const embed = createCustomEmbed(config.customEmbeds.punishment, {
+          action: actionLabel,
+          user_tag: user.tag,
+          user_id: userId,
+          moderator: moderator || 'Dashboard',
+          reason: reason || 'Não informado',
+          duration: duration || 'N/A',
+          reporter_id: reporterId || 'N/A'
+        });
 
-        if (evidenceUrl) punEmbed.setImage(evidenceUrl);
-        await punChannel.send({ embeds: [punEmbed] });
+        if (evidenceUrl) embed.setImage(evidenceUrl);
+        await punChannel.send({ embeds: [embed] });
       }
     }
 
