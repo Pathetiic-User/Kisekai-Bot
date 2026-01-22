@@ -49,10 +49,10 @@ app.use(cors({
   credentials: true
 }));
 
-// Limite de requisições: 100 por 15 minutos
+// Limite de requisições: 1000 por 15 minutos
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 100,
+  limit: 1000,
   message: { error: 'Muitas requisições, tente novamente mais tarde.' }
 });
 app.use('/api/', limiter);
@@ -1019,15 +1019,32 @@ app.post('/api/broadcast', async (req, res) => {
   }
 });
 
+app.get('/api/templates', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM templates ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/templates', async (req, res) => {
-  const { name, data } = req.body;
-  const result = await pool.query('INSERT INTO templates (name, data) VALUES ($1, $2) RETURNING *', [name, data]);
-  res.json(result.rows[0]);
+  try {
+    const { name, data } = req.body;
+    const result = await pool.query('INSERT INTO templates (name, data) VALUES ($1, $2) RETURNING *', [name, data]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/api/templates/:id', async (req, res) => {
-  await pool.query('DELETE FROM templates WHERE id = $1', [req.params.id]);
-  res.json({ success: true });
+  try {
+    await pool.query('DELETE FROM templates WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/restart', (req, res) => {
