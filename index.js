@@ -25,11 +25,17 @@ const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 app.use(helmet()); // Proteção de headers
 app.use(express.json());
-app.use(cors());
+app.use(cookieParser());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  credentials: true
+}));
 
 // Limite de requisições: 100 por 15 minutos
 const limiter = rateLimit({
@@ -41,18 +47,38 @@ app.use('/api/', limiter);
 
 // Middleware de Autenticação da API
 const authMiddleware = (req, res, next) => {
+  // Excluir rotas de autenticação da verificação
+  if (req.path.startsWith('/auth/')) return next();
+
   const apiKey = req.headers['x-api-key'];
   const masterKey = process.env.API_KEY;
+  const token = req.cookies.token;
   
-  if (!masterKey) {
+  // 1. Verificar API Key (para chamadas externas/bot)
+  if (apiKey && masterKey && apiKey === masterKey) {
+    return next();
+  }
+
+  // 2. Verificar JWT (para Dashboard)
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      if (decoded.hasAccess) {
+        req.user = decoded;
+        return next();
+      }
+      return res.status(403).json({ error: 'Acesso negado: Você não tem permissão para acessar o dashboard.' });
+    } catch (err) {
+      // Token inválido, continua para erro 401
+    }
+  }
+
+  if (!masterKey && !token) {
     console.error('ERRO CRÍTICO: API_KEY não definida no arquivo .env!');
     return res.status(500).json({ error: 'Erro interno de configuração de segurança.' });
   }
 
-  if (!apiKey || apiKey !== masterKey) {
-    return res.status(401).json({ error: 'Acesso negado: API Key inválida ou ausente.' });
-  }
-  next();
+  return res.status(401).json({ error: 'Acesso negado: Autenticação inválida ou ausente.' });
 };
 
 // Aplicar autenticação em todas as rotas de API
@@ -123,6 +149,11 @@ async function initDb() {
         deleted_at TIMESTAMPTZ,
         timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS dashboard_access (
+        user_id TEXT PRIMARY KEY,
+        is_admin BOOLEAN DEFAULT FALSE,
+        granted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
 
       -- Migration for existing tables
       DO $$ 
@@ -145,6 +176,7 @@ async function initDb() {
         punishChats: [],
         reportChannel: "",
         punishmentChannel: "",
+        adminRole: "",
         customEmbeds: {
           welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
           warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" },
@@ -508,6 +540,169 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
+// --- DISCORD OAUTH2 AUTHENTICATION ---
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI;
+const JWT_SECRET = process.env.JWT_SECRET || 'kisekai-secret-key';
+
+app.get('/api/auth/login', (req, res) => {
+  const url = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20guilds`;
+  res.redirect(url);
+});
+
+app.get('/api/auth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).json({ error: 'No code provided' });
+
+  try {
+    const params = new URLSearchParams();
+    params.append('client_id', DISCORD_CLIENT_ID);
+    params.append('client_secret', DISCORD_CLIENT_SECRET);
+    params.append('grant_type', 'authorization_code');
+    params.append('code', code);
+    params.append('redirect_uri', DISCORD_REDIRECT_URI);
+
+    const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    const accessToken = tokenResponse.data.access_token;
+
+    const userResponse = await axios.get('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+
+    const userData = userResponse.data;
+    
+    // Check access
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    let hasAccess = false;
+    let role = 'user';
+
+    if (guild) {
+      if (userData.id === guild.ownerId) {
+        hasAccess = true;
+        role = 'owner';
+      } else {
+        const dbCheck = await pool.query('SELECT is_admin FROM dashboard_access WHERE user_id = $1', [userData.id]);
+        if (dbCheck.rows.length > 0) {
+          hasAccess = true;
+          role = dbCheck.rows[0].is_admin ? 'admin' : 'moderator';
+        }
+      }
+    }
+
+    const token = jwt.sign({ 
+      id: userData.id, 
+      username: userData.username, 
+      avatar: userData.avatar,
+      hasAccess,
+      role
+    }, JWT_SECRET, { expiresIn: '7d' });
+
+    res.cookie('token', token, { 
+      httpOnly: true, 
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000 
+    });
+
+    // Redirect based on access
+    const redirectUrl = hasAccess ? (process.env.DASHBOARD_URL || '/dashboard') : (process.env.REPORT_PAGE_URL || '/report');
+    res.redirect(redirectUrl);
+
+  } catch (err) {
+    console.error('OAuth error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ authenticated: false });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    res.json({ authenticated: true, user: decoded });
+  } catch (err) {
+    res.status(401).json({ authenticated: false });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true });
+});
+
+// --- DASHBOARD ACCESS MANAGEMENT ---
+app.get('/api/access', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM dashboard_access ORDER BY granted_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/access/grant', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode conceder acesso.' });
+  }
+
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+  try {
+    await pool.query(
+      'INSERT INTO dashboard_access (user_id, is_admin) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET is_admin = $2',
+      [userId, true]
+    );
+
+    // Give Discord Role
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (guild && config.adminRole) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        await member.roles.add(config.adminRole).catch(console.error);
+      }
+    }
+
+    res.json({ success: true, message: 'Acesso concedido e cargo atribuído.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/access/revoke', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode revogar acesso.' });
+  }
+
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+  try {
+    await pool.query('DELETE FROM dashboard_access WHERE user_id = $1', [userId]);
+
+    // Remove Discord Role
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (guild && config.adminRole) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        await member.roles.remove(config.adminRole).catch(console.error);
+      }
+    }
+
+    res.json({ success: true, message: 'Acesso revogado e cargo removido.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API Endpoints
 app.get('/api/config', (req, res) => res.json(config));
 
@@ -564,6 +759,34 @@ app.get('/api/stats', (req, res) => {
     uptimeFormatted: ms(client.uptime, { long: true }),
     lastRestart: new Date(Date.now() - client.uptime).toISOString()
   });
+});
+
+app.get('/api/users/search', async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.json([]);
+
+  try {
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    
+    if (!guild) {
+      return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
+    }
+
+    const members = await guild.members.fetch({ query: q, limit: 20 });
+    const results = members.map(m => ({
+      id: m.user.id,
+      username: m.user.username,
+      globalName: m.user.globalName, // Nome da conta (Display Name global)
+      displayName: m.displayName,     // Apelido no servidor
+      avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 })
+    }));
+
+    res.json(results);
+  } catch (err) {
+    console.error('User search error:', err);
+    res.status(500).json({ error: 'Erro ao buscar usuários.' });
+  }
 });
 
 app.get('/api/reports', async (req, res) => {
