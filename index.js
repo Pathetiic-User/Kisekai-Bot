@@ -64,15 +64,19 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('ERRO CRÍTICO: SUPABASE_SERVICE_ROLE_KEY não definida no arquivo .env!');
+  console.error('Obtenha essa chave em: Project Settings > API > service_role (secret)');
+  process.exit(1);
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || `https://${process.env.DATABASE_URL.split('@')[1].split('.')[0]}.supabase.co`,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabaseUrl = process.env.SUPABASE_URL || `https://${process.env.DATABASE_URL.split('@')[1].split('.')[0]}.supabase.co`;
+const supabase = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 const client = new Client({
   intents: [
