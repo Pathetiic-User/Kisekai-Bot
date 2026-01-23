@@ -58,7 +58,7 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // Middleware de Autenticação da API
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   // Excluir rotas de autenticação da verificação
   if (req.path.startsWith('/auth/')) return next();
 
@@ -75,11 +75,31 @@ const authMiddleware = (req, res, next) => {
   if (token) {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      if (decoded.hasAccess) {
+      
+      // Verificar se o usuário ainda tem o cargo obrigatório ou é o dono
+      const authorizedGuildId = "1438658038612623534";
+      const dashboardRoleID = "1464264578773811301";
+      const guild = client.guilds.cache.get(authorizedGuildId);
+      
+      let hasRealTimeAccess = false;
+      if (guild) {
+        if (decoded.id === guild.ownerId) {
+          hasRealTimeAccess = true;
+        } else {
+          const member = await guild.members.fetch(decoded.id).catch(() => null);
+          if (member && member.roles.cache.has(dashboardRoleID)) {
+            hasRealTimeAccess = true;
+          }
+        }
+      }
+
+      if (hasRealTimeAccess) {
         req.user = decoded;
+        // Log access
+        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System').catch(console.error);
         return next();
       }
-      return res.status(403).json({ error: 'Acesso negado: Você não tem permissão para acessar o dashboard.' });
+      return res.status(403).json({ error: 'Acesso negado: Você não tem o cargo necessário para acessar o dashboard.' });
     } catch (err) {
       // Token inválido, continua para erro 401
     }
@@ -170,6 +190,33 @@ async function initDb() {
         is_admin BOOLEAN DEFAULT FALSE,
         granted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS linked_accounts (
+        user_id TEXT PRIMARY KEY,
+        linked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS sweepstakes (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        message_id TEXT,
+        title TEXT NOT NULL,
+        description TEXT,
+        start_time TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMPTZ NOT NULL,
+        result_time TIMESTAMPTZ,
+        max_participants INTEGER,
+        winners_count INTEGER DEFAULT 1,
+        status TEXT DEFAULT 'active',
+        winners JSONB DEFAULT '[]',
+        config JSONB DEFAULT '{}'
+      );
+      CREATE TABLE IF NOT EXISTS sweepstakes_participants (
+        id SERIAL PRIMARY KEY,
+        sweepstake_id INTEGER REFERENCES sweepstakes(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        registered_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(sweepstake_id, user_id)
+      );
 
       -- Migration for existing tables
       DO $$ 
@@ -186,15 +233,16 @@ async function initDb() {
     const res = await client.query('SELECT data FROM configs LIMIT 1');
     if (res.rows.length === 0) {
       config = {
-        prefix: "!",
+        prefix: "/",
         messages: {},
         antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
         punishChats: [],
-        reportChannel: "",
-        punishmentChannel: "",
+        reportChannel: "1463183940809392269",
+        punishmentChannel: "1463186111458443450",
+        sweepstakeChannel: "1464266529058193429",
         adminRole: "",
         customEmbeds: {
-          welcome: { enabled: false, channel: "", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
+          welcome: { enabled: false, channel: "1438658039656743024", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
           warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" },
           reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" },
           resolvedReport: { enabled: true, title: "✅ Reporte Bem-Sucedido", description: "Um reporte foi analisado e o usuário foi punido.", color: "#00ff00", fields: [{ name: "👤 Usuário Punido", value: "{reported_tag}", inline: true }, { name: "🚩 Motivo", value: "{reason}", inline: false }] },
@@ -469,6 +517,99 @@ client.on('messageCreate', async message => {
 });
 
 // Interaction Handler
+// Interaction Handler
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (user.bot) return;
+  if (reaction.partial) await reaction.fetch();
+  if (reaction.emoji.name !== '🎉') return;
+
+  const messageId = reaction.message.id;
+  try {
+    const { rows } = await pool.query('SELECT * FROM sweepstakes WHERE message_id = $1 AND status = $2', [messageId, 'active']);
+    if (rows.length === 0) return;
+    const sweepstake = rows[0];
+
+    const now = new Date();
+    if (new Date(sweepstake.end_time) < now) {
+      await reaction.users.remove(user.id).catch(() => null);
+      return user.send({ content: "❌ Este sorteio já encerrou o período de inscrições." }).catch(() => null);
+    }
+
+    // Check link
+    const linkCheck = await pool.query('SELECT * FROM linked_accounts WHERE user_id = $1', [user.id]);
+    if (linkCheck.rows.length === 0) {
+      await reaction.users.remove(user.id).catch(() => null);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
+      return user.send({ content: `❌ Você precisa vincular sua conta ao bot para participar! Clique aqui: ${frontendUrl}/sweepstakes` }).catch(() => null);
+    }
+
+    // Check max participants
+    if (sweepstake.max_participants) {
+      const countCheck = await pool.query('SELECT COUNT(*) FROM sweepstakes_participants WHERE sweepstake_id = $1', [sweepstake.id]);
+      if (parseInt(countCheck.rows[0].count) >= sweepstake.max_participants) {
+        await reaction.users.remove(user.id).catch(() => null);
+        return user.send({ content: "❌ O limite máximo de participantes para este sorteio foi atingido." }).catch(() => null);
+      }
+    }
+
+    // Register
+    await pool.query('INSERT INTO sweepstakes_participants (sweepstake_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [sweepstake.id, user.id]);
+    user.send({ content: "✅ Você está participando do sorteio!" }).catch(() => null);
+
+  } catch (err) {
+    console.error('Sweepstake reaction error:', err);
+  }
+});
+
+app.post('/api/sweepstakes/:id/draw', async (req, res) => {
+  const { id } = req.params;
+  const { manualWinnerId } = req.body;
+
+  try {
+    const sweepResult = await pool.query('SELECT * FROM sweepstakes WHERE id = $1', [id]);
+    if (sweepResult.rows.length === 0) return res.status(404).json({ error: 'Sorteio não encontrado' });
+    const sweepstake = sweepResult.rows[0];
+
+    let winners = [];
+
+    if (manualWinnerId) {
+      winners = [manualWinnerId];
+    } else {
+      const participantsResult = await pool.query('SELECT user_id FROM sweepstakes_participants WHERE sweepstake_id = $1', [id]);
+      const participants = participantsResult.rows.map(r => r.user_id);
+      
+      if (participants.length === 0) return res.status(400).json({ error: 'Nenhum participante' });
+
+      const count = Math.min(sweepstake.winners_count || 1, participants.length);
+      for (let i = 0; i < count; i++) {
+        const randomIndex = Math.floor(Math.random() * participants.length);
+        winners.push(participants.splice(randomIndex, 1)[0]);
+      }
+    }
+
+    await pool.query('UPDATE sweepstakes SET winners = $1, status = $2 WHERE id = $3', [JSON.stringify(winners), 'ended', id]);
+
+    // Notifications
+    for (const winnerId of winners) {
+      const winner = await client.users.fetch(winnerId).catch(() => null);
+      if (winner) {
+        winner.send({ content: `🎊 PARABÉNS! Você ganhou o sorteio: **${sweepstake.title}**!` }).catch(() => null);
+      }
+    }
+
+    // Send result to channel
+    const channel = await client.channels.fetch(sweepstake.channel_id).catch(() => null);
+    if (channel) {
+      const winnersMention = winners.map(w => `<@${w}>`).join(', ');
+      channel.send({ content: `🎉 O sorteio **${sweepstake.title}** terminou!\n🏆 Ganhadores: ${winnersMention}` });
+    }
+
+    res.json({ success: true, winners });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === 'reportar') {
@@ -593,6 +734,7 @@ app.get('/api/auth/callback', async (req, res) => {
     
     // Check access
     const authorizedGuildId = "1438658038612623534";
+    const dashboardRoleID = "1464264578773811301";
     const guild = client.guilds.cache.get(authorizedGuildId);
     let hasAccess = false;
     let role = 'user';
@@ -602,10 +744,10 @@ app.get('/api/auth/callback', async (req, res) => {
         hasAccess = true;
         role = 'owner';
       } else {
-        const dbCheck = await pool.query('SELECT is_admin FROM dashboard_access WHERE user_id = $1', [userData.id]);
-        if (dbCheck.rows.length > 0) {
+        const member = await guild.members.fetch(userData.id).catch(() => null);
+        if (member && member.roles.cache.has(dashboardRoleID)) {
           hasAccess = true;
-          role = dbCheck.rows[0].is_admin ? 'admin' : 'moderator';
+          role = 'admin'; // Or check DB if specific admin/moderator roles are still needed
         }
       }
     }
@@ -709,11 +851,12 @@ app.post('/api/access/grant', async (req, res) => {
 
     // Give Discord Role
     const authorizedGuildId = "1438658038612623534";
+    const dashboardRoleID = "1464264578773811301";
     const guild = client.guilds.cache.get(authorizedGuildId);
-    if (guild && config.adminRole) {
+    if (guild) {
       const member = await guild.members.fetch(userId).catch(() => null);
       if (member) {
-        await member.roles.add(config.adminRole).catch(console.error);
+        await member.roles.add(dashboardRoleID).catch(console.error);
       }
     }
 
@@ -736,11 +879,12 @@ app.post('/api/access/revoke', async (req, res) => {
 
     // Remove Discord Role
     const authorizedGuildId = "1438658038612623534";
+    const dashboardRoleID = "1464264578773811301";
     const guild = client.guilds.cache.get(authorizedGuildId);
-    if (guild && config.adminRole) {
+    if (guild) {
       const member = await guild.members.fetch(userId).catch(() => null);
       if (member) {
-        await member.roles.remove(config.adminRole).catch(console.error);
+        await member.roles.remove(dashboardRoleID).catch(console.error);
       }
     }
 
@@ -798,13 +942,36 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
+  let dbHealthy = false;
+  try {
+    const dbCheck = await pool.query('SELECT 1');
+    if (dbCheck) dbHealthy = true;
+  } catch (e) {
+    dbHealthy = false;
+  }
+
+  const gatewayStatusMap = {
+    0: 'Online',
+    1: 'Conectando',
+    2: 'Reconectando',
+    3: 'Inativo',
+    4: 'Inicializando',
+    5: 'Desconectado',
+    6: 'Aguardando Guildas',
+    7: 'Identificando',
+    8: 'Retomando'
+  };
+
   res.json({
     servers: client.guilds.cache.size,
     users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
     uptime: client.uptime,
-    uptimeFormatted: ms(client.uptime, { long: true }),
-    lastRestart: new Date(Date.now() - client.uptime).toISOString()
+    uptimeFormatted: ms(client.uptime || 0, { long: true }),
+    lastRestart: new Date(Date.now() - (client.uptime || 0)).toISOString(),
+    apiStatus: 'Online',
+    gatewayStatus: gatewayStatusMap[client.ws.status] || 'Desconhecido',
+    dbStatus: dbHealthy ? 'Saudável' : 'Instável'
   });
 });
 
@@ -864,8 +1031,15 @@ app.get('/api/users', async (req, res) => {
       globalName: m.user.globalName,
       displayName: m.displayName,
       avatar: m.user.avatar,
-      avatarURL: m.user.displayAvatarURL({ size: 256 })
-    }));
+      avatarURL: m.user.displayAvatarURL({ size: 256 }),
+      isBot: m.user.bot,
+      isApp: m.user.bot, // Categorizando como APP se for bot
+      isOwner: m.id === guild.ownerId
+    })).sort((a, b) => {
+      if (a.isOwner) return -1;
+      if (b.isOwner) return 1;
+      return a.username.localeCompare(b.username);
+    });
 
     // Update cache
     usersCache.data = results;
@@ -886,6 +1060,42 @@ app.get('/api/users', async (req, res) => {
     }
 
     res.status(500).json({ error: 'Erro ao listar usuários.' });
+  }
+});
+
+app.post('/api/users/reload/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (!guild) return res.status(404).json({ error: 'Guild not found' });
+
+    const member = await guild.members.fetch(userId);
+    const userData = {
+      id: member.user.id,
+      username: member.user.username,
+      globalName: member.user.globalName,
+      displayName: member.displayName,
+      avatar: member.user.avatar,
+      avatarURL: member.user.displayAvatarURL({ size: 256 }),
+      isBot: member.user.bot,
+      isApp: member.user.bot,
+      isOwner: member.id === guild.ownerId
+    };
+
+    // Update specific user in cache if cache exists
+    if (usersCache.data) {
+      const index = usersCache.data.findIndex(u => u.id === userId);
+      if (index !== -1) {
+        usersCache.data[index] = userData;
+      } else {
+        usersCache.data.push(userData);
+      }
+    }
+
+    res.json(userData);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -925,6 +1135,80 @@ app.get('/api/reports', async (req, res) => {
     }));
 
     res.json(reportsWithDetails);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/reports/:id/resolve', async (req, res) => {
+  const { id } = req.params;
+  const { action, reason, duration, moderator } = req.body;
+
+  if (!['kick', 'ban', 'mute', 'warn', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'Ação inválida' });
+  }
+
+  try {
+    const reportResult = await pool.query('SELECT * FROM reports WHERE id = $1', [id]);
+    if (reportResult.rows.length === 0) return res.status(404).json({ error: 'Reporte não encontrado' });
+    const report = reportResult.rows[0];
+
+    if (action === 'reject') {
+      await pool.query("UPDATE reports SET status = 'rejected' WHERE id = $1", [id]);
+      return res.json({ success: true, message: 'Reporte rejeitado' });
+    }
+
+    // Process moderation action
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (!guild) return res.status(500).json({ error: 'Guild not found' });
+
+    const member = await guild.members.fetch(report.reported_id).catch(() => null);
+    const user = member ? member.user : await client.users.fetch(report.reported_id).catch(() => null);
+
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    let actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
+    
+    switch (action) {
+      case 'kick':
+        if (!member) return res.status(400).json({ error: 'Membro não está no servidor' });
+        await member.kick(reason || 'Kicked via Report Resolution');
+        break;
+      case 'ban':
+        await guild.members.ban(report.reported_id, { reason: reason || 'Banned via Report Resolution' });
+        break;
+      case 'mute':
+        if (!member) return res.status(400).json({ error: 'Membro não está no servidor' });
+        await member.timeout(duration ? ms(duration) : ms('10m'), reason || 'Muted via Report Resolution');
+        break;
+      case 'warn':
+        actionLabel = 'Warning';
+        break;
+    }
+
+    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard');
+    await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [id]);
+
+    // Send to punishments channel
+    if (config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
+      const punChannel = guild.channels.cache.get(config.punishmentChannel);
+      if (punChannel) {
+        const embed = createCustomEmbed(config.customEmbeds.punishment, {
+          action: actionLabel,
+          user_tag: user.tag,
+          user_id: report.reported_id,
+          moderator: moderator || 'Dashboard',
+          reason: reason || 'Punição via Reporte',
+          duration: duration || 'N/A',
+          reporter_id: report.reporter_id
+        });
+        if (report.image_url) embed.setImage(report.image_url);
+        await punChannel.send({ embeds: [embed] });
+      }
+    }
+
+    res.json({ success: true, message: `Reporte resolvido com ação: ${actionLabel}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1011,6 +1295,217 @@ app.delete('/api/reports/:id', async (req, res) => {
 
       return res.json({ message: 'Reporte enviado para a lixeira', report: result.rows[0] });
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/moderation/punishments', async (req, res) => {
+  try {
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (!guild) return res.status(404).json({ error: 'Guild not found' });
+
+    const bans = await guild.bans.fetch();
+    const formattedBans = bans.map(b => ({
+      type: 'ban',
+      userId: b.user.id,
+      username: b.user.username,
+      reason: b.reason,
+      avatarURL: b.user.displayAvatarURL()
+    }));
+
+    // For mutes, we need to fetch all members and check for communicationDisabledUntil
+    const members = await guild.members.fetch();
+    const mutes = members.filter(m => m.communicationDisabledUntil && m.communicationDisabledUntil > new Date());
+    const formattedMutes = mutes.map(m => ({
+      type: 'mute',
+      userId: m.user.id,
+      username: m.user.username,
+      reason: 'N/A (Timeout ativo)',
+      avatarURL: m.user.displayAvatarURL(),
+      endsAt: m.communicationDisabledUntil
+    }));
+
+    res.json({ bans: formattedBans, mutes: formattedMutes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/moderation/unban', async (req, res) => {
+  const { userId } = req.body;
+  try {
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    if (!guild) return res.status(404).json({ error: 'Guild not found' });
+
+    await guild.members.unban(userId);
+    res.json({ success: true, message: 'Usuário desbanido' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/moderation/history', async (req, res) => {
+  try {
+    const kicks = await pool.query("SELECT * FROM logs WHERE action = 'Kick' ORDER BY timestamp DESC");
+    const warns = await pool.query("SELECT * FROM logs WHERE action = 'Warning' ORDER BY timestamp DESC");
+    
+    // Group warnings by user
+    const warnHistory = {};
+    for (const row of warns.rows) {
+      if (!warnHistory[row.user_id]) {
+        try {
+          const user = await client.users.fetch(row.user_id);
+          warnHistory[row.user_id] = {
+            userId: row.user_id,
+            username: user.username,
+            avatarURL: user.displayAvatarURL(),
+            warnings: []
+          };
+        } catch (e) {
+          warnHistory[row.user_id] = {
+            userId: row.user_id,
+            username: 'Unknown',
+            warnings: []
+          };
+        }
+      }
+      warnHistory[row.user_id].warnings.push({
+        id: row.id,
+        reason: row.reason,
+        moderator: row.moderator,
+        timestamp: row.timestamp
+      });
+    }
+
+    res.json({ 
+      kicks: kicks.rows, 
+      warnHistory: Object.values(warnHistory) 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/moderation/history/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await pool.query("SELECT * FROM logs WHERE user_id = $1 AND action = 'Warning' ORDER BY timestamp DESC", [userId]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- SWEEPSTAKES SYSTEM ---
+app.get('/api/sweepstakes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM sweepstakes ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sweepstakes', async (req, res) => {
+  const { title, description, endTime, maxParticipants, winnersCount, channelId } = req.body;
+  const authorizedGuildId = "1438658038612623534";
+  const guild = client.guilds.cache.get(authorizedGuildId);
+  
+  if (!guild) return res.status(500).json({ error: 'Guild not found' });
+  const channel = guild.channels.cache.get(channelId || config.sweepstakeChannel);
+  if (!channel) return res.status(400).json({ error: 'Canal de sorteio não configurado' });
+
+  try {
+    const result = await pool.query(
+      'INSERT INTO sweepstakes (guild_id, channel_id, title, description, end_time, max_participants, winners_count) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [authorizedGuildId, channel.id, title, description, endTime, maxParticipants, winnersCount]
+    );
+    const sweepstake = result.rows[0];
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🎉 SORTEIO: ${title}`)
+      .setDescription(`${description}\n\n**Ganhadores:** ${winnersCount}\n**Termina em:** <t:${Math.floor(new Date(endTime).getTime() / 1000)}:R>\n\nReaja com 🎉 para participar!`)
+      .setColor('#ff00ea')
+      .setFooter({ text: `ID: ${sweepstake.id} | Máx: ${maxParticipants || 'Ilimitado'}` });
+
+    const message = await channel.send({ embeds: [embed] });
+    await message.react('🎉');
+
+    await pool.query('UPDATE sweepstakes SET message_id = $1 WHERE id = $2', [message.id, sweepstake.id]);
+    sweepstake.message_id = message.id;
+
+    res.json(sweepstake);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/sweepstakes/:id/participants', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT sp.*, u.username, u.avatar 
+      FROM sweepstakes_participants sp
+      -- Tentaremos enriquecer depois se não tivermos uma tabela de usuários, 
+      -- por enquanto pegamos o que temos
+      WHERE sp.sweepstake_id = $1
+    `, [req.params.id]);
+    
+    const enriched = await Promise.all(result.rows.map(async (row) => {
+      try {
+        const user = await client.users.fetch(row.user_id);
+        return {
+          ...row,
+          username: user.username,
+          avatarURL: user.displayAvatarURL()
+        };
+      } catch (e) {
+        return row;
+      }
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/sweepstakes/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT channel_id, message_id FROM sweepstakes WHERE id = $1', [req.params.id]);
+    if (rows.length > 0) {
+      const { channel_id, message_id } = rows[0];
+      const channel = await client.channels.fetch(channel_id).catch(() => null);
+      if (channel && message_id) {
+        const msg = await channel.messages.fetch(message_id).catch(() => null);
+        if (msg) await msg.delete().catch(() => null);
+      }
+    }
+    await pool.query('DELETE FROM sweepstakes WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sweepstakes/link-account', async (req, res) => {
+  const { userId } = req.body; // In real app, get from req.user
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+  try {
+    await pool.query('INSERT INTO linked_accounts (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [userId]);
+    res.json({ success: true, message: 'Conta vinculada com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/sweepstakes/check-link/:userId', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM linked_accounts WHERE user_id = $1', [req.params.userId]);
+    res.json({ linked: result.rows.length > 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
