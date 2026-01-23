@@ -128,6 +128,10 @@ const client = new Client({
 
 let config = {};
 const spamMap = new Map();
+let usersCache = {
+  data: null,
+  lastFetched: 0
+};
 
 // Database Initialization
 async function initDb() {
@@ -811,6 +815,13 @@ app.get('/api/users/search', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
   try {
+    const CACHE_DURATION = 5 * 60 * 1000; // 5 minutos
+    const now = Date.now();
+
+    if (usersCache.data && (now - usersCache.lastFetched < CACHE_DURATION)) {
+      return res.json(usersCache.data);
+    }
+
     const authorizedGuildId = "1438658038612623534";
     const guild = client.guilds.cache.get(authorizedGuildId);
     
@@ -818,20 +829,39 @@ app.get('/api/users', async (req, res) => {
       return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
     }
 
-    // Fetch all members (limit to 1000 for safety, or fetch all if needed)
-    const members = await guild.members.fetch();
+    // Fetch all members with a timeout for safety
+    const members = await guild.members.fetch({ withPresences: false }).catch(err => {
+      console.error('Error fetching members:', err);
+      throw err;
+    });
+
     const results = members.map(m => ({
       id: m.user.id,
       username: m.user.username,
       globalName: m.user.globalName,
       displayName: m.displayName,
-      avatar: m.user.avatar, // Added for the frontend helper
-      avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 })
+      avatar: m.user.avatar,
+      avatarURL: m.user.displayAvatarURL({ size: 256 })
     }));
+
+    // Update cache
+    usersCache.data = results;
+    usersCache.lastFetched = now;
 
     res.json(results);
   } catch (err) {
-    console.error('Get all users error:', err);
+    console.error('Get all users error details:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code
+    });
+
+    // If fetch fails but we have old cache, return it as fallback
+    if (usersCache.data) {
+      console.log('Returning stale cache due to fetch error');
+      return res.json(usersCache.data);
+    }
+
     res.status(500).json({ error: 'Erro ao listar usuários.' });
   }
 });
