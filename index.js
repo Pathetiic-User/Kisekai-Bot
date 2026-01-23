@@ -14,7 +14,8 @@ const {
   ButtonBuilder,
   StringSelectMenuBuilder,
   ButtonStyle,
-  ComponentType
+  ComponentType,
+  MessageFlags
 } = require('discord.js');
 const fs = require('fs');
 const ms = require('ms');
@@ -31,6 +32,7 @@ const multer = require('multer');
 const path = require('path');
 
 const app = express();
+app.set('trust proxy', 1); // Confiar no proxy (Cloudflare, Vercel, etc.)
 app.use(helmet()); // Proteção de headers
 app.use(express.json());
 app.use(cookieParser());
@@ -38,8 +40,10 @@ app.use(cors({
   origin: function(origin, callback) {
     const allowedOrigins = [
       'http://localhost:8080',
+      'http://localhost:3000',
       'https://kisekai-dashboard.vercel.app', // Adicione outros se tiver
-      process.env.FRONTEND_URL
+      process.env.FRONTEND_URL,
+      process.env.DASHBOARD_URL
     ].filter(Boolean);
     
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
@@ -141,7 +145,19 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const supabaseUrl = process.env.SUPABASE_URL || `https://${process.env.DATABASE_URL.split('@')[1].split('.')[0]}.supabase.co`;
+// Lógica corrigida para extrair a URL do Supabase do DATABASE_URL se não estiver definida
+let supabaseUrl = process.env.SUPABASE_URL;
+if (!supabaseUrl && process.env.DATABASE_URL) {
+  const match = process.env.DATABASE_URL.match(/postgres\.([^@:]+)/);
+  if (match && match[1]) {
+    supabaseUrl = `https://${match[1]}.supabase.co`;
+  }
+}
+
+if (!supabaseUrl) {
+  console.error('ERRO: SUPABASE_URL não definida e não pôde ser extraída do DATABASE_URL');
+}
+
 const supabase = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 const client = new Client({
@@ -422,7 +438,7 @@ function createCustomEmbed(data, placeholders = {}) {
   return embed;
 }
 
-client.on('ready', async () => {
+client.on('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
   
   // Security: Leave unauthorized guilds
@@ -655,11 +671,11 @@ client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === 'reportar') {
       if (!config.reportChannel) {
-        return interaction.reply({ content: "O sistema de reportes não está configurado. Por favor, configure um canal no dashboard.", ephemeral: true });
+        return interaction.reply({ content: "O sistema de reportes não está configurado. Por favor, configure um canal no dashboard.", flags: [MessageFlags.Ephemeral] });
       }
 
       if (interaction.channelId !== config.reportChannel) {
-        return interaction.reply({ content: `Este comando só pode ser usado no canal <#${config.reportChannel}>`, ephemeral: true });
+        return interaction.reply({ content: `Este comando só pode ser usado no canal <#${config.reportChannel}>`, flags: [MessageFlags.Ephemeral] });
       }
 
       const reportedUser = interaction.options.getUser('usuario');
@@ -667,7 +683,7 @@ client.on('interactionCreate', async interaction => {
       const attachment = interaction.options.getAttachment('prova');
 
       try {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
         let finalImageUrl = attachment.url;
         let storagePath = null;
@@ -707,7 +723,7 @@ client.on('interactionCreate', async interaction => {
         if (interaction.deferred) {
           await interaction.editReply({ content: 'Ocorreu um erro ao processar seu reporte.' });
         } else {
-          await interaction.reply({ content: 'Ocorreu um erro ao processar seu reporte.', ephemeral: true });
+          await interaction.reply({ content: 'Ocorreu um erro ao processar seu reporte.', flags: [MessageFlags.Ephemeral] });
         }
       }
     }
@@ -715,16 +731,16 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.isButton()) {
     if (interaction.customId === 'btn_info') {
-      await interaction.reply({ content: 'Este é um bot multifuncional desenvolvido para Kisekai.', ephemeral: true });
+      await interaction.reply({ content: 'Este é um bot multifuncional desenvolvido para Kisekai.', flags: [MessageFlags.Ephemeral] });
     } else if (interaction.customId === 'btn_help') {
-      await interaction.reply({ content: 'Use `!help` para ver a lista de comandos ou entre em contato com a staff.', ephemeral: true });
+      await interaction.reply({ content: 'Use `!help` para ver a lista de comandos ou entre em contato com a staff.', flags: [MessageFlags.Ephemeral] });
     }
   }
 
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === 'menu_select') {
       const selected = interaction.values[0];
-      await interaction.reply({ content: `Você selecionou: ${selected}. Esta função será implementada em breve!`, ephemeral: true });
+      await interaction.reply({ content: `Você selecionou: ${selected}. Esta função será implementada em breve!`, flags: [MessageFlags.Ephemeral] });
     }
   }
 });
