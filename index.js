@@ -664,7 +664,30 @@ app.post('/api/auth/logout', (req, res) => {
 app.get('/api/access', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM dashboard_access ORDER BY granted_at DESC');
-    res.json(result.rows);
+    
+    // Enrich with user details from Discord
+    const enrichedResults = await Promise.all(result.rows.map(async (row) => {
+      try {
+        const user = await client.users.fetch(row.user_id);
+        return {
+          id: row.user_id,
+          username: user.username,
+          avatar: user.avatar,
+          grantedAt: row.granted_at,
+          isAdmin: row.is_admin
+        };
+      } catch (err) {
+        return {
+          id: row.user_id,
+          username: 'Usuário Desconhecido',
+          avatar: null,
+          grantedAt: row.granted_at,
+          isAdmin: row.is_admin
+        };
+      }
+    }));
+
+    res.json(enrichedResults);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
