@@ -27,6 +27,8 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const multer = require('multer');
+const path = require('path');
 
 const app = express();
 app.use(helmet()); // Proteção de headers
@@ -48,6 +50,12 @@ app.use(cors({
   },
   credentials: true
 }));
+
+// Multer setup for temporary storage
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
 // Limite de requisições: 1000 por 15 minutos
 const limiter = rateLimit({
@@ -96,7 +104,7 @@ const authMiddleware = async (req, res, next) => {
       if (hasRealTimeAccess) {
         req.user = decoded;
         // Log access
-        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System').catch(console.error);
+        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System', 'System').catch(console.error);
         return next();
       }
       return res.status(403).json({ error: 'Acesso negado: Você não tem o cargo necessário para acessar o dashboard.' });
@@ -227,6 +235,17 @@ async function initDb() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='deleted_at') THEN
           ALTER TABLE reports ADD COLUMN deleted_at TIMESTAMPTZ;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='type') THEN
+          ALTER TABLE logs ADD COLUMN type TEXT DEFAULT 'Admin';
+        ELSE
+          UPDATE logs SET type = 'Admin' WHERE type = 'Moderation';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='storage_path') THEN
+          ALTER TABLE reports ADD COLUMN storage_path TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='duration') THEN
+          ALTER TABLE logs ADD COLUMN duration TEXT;
+        END IF;
       END $$;
     `);
 
@@ -294,10 +313,10 @@ async function saveConfig() {
   await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
 }
 
-async function addLog(userId, action, reason, moderator) {
+async function addLog(userId, action, reason, moderator, type = 'Admin', duration = null) {
   await pool.query(
-    'INSERT INTO logs (user_id, action, reason, moderator) VALUES ($1, $2, $3, $4)',
-    [userId, action, reason, moderator]
+    'INSERT INTO logs (user_id, action, reason, moderator, type, duration) VALUES ($1, $2, $3, $4, $5, $6)',
+    [userId, action, reason, moderator, type, duration]
   );
 }
 
@@ -307,6 +326,28 @@ function getMessage(key, placeholders = {}) {
     msg = msg.replace(`{${k}}`, v);
   }
   return msg;
+}
+
+async function uploadToSupabase(fileBuffer, fileName, contentType) {
+  try {
+    const { data, error } = await supabase.storage
+      .from('reports')
+      .upload(fileName, fileBuffer, {
+        contentType: contentType,
+        upsert: true
+      });
+
+    if (error) throw error;
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('reports')
+      .getPublicUrl(fileName);
+
+    return { publicUrl, storagePath: fileName };
+  } catch (err) {
+    console.error('Supabase upload error:', err);
+    return null;
+  }
 }
 
 async function logToChannel(guild, type, description) {
@@ -500,7 +541,7 @@ client.on('messageCreate', async message => {
           } else if (config.antiSpam.action === 'kick') {
             await message.member.kick('Auto-Mod: Anti-Spam');
           }
-          await addLog(message.author.id, 'Auto-Punish (Spam)', `Action: ${config.antiSpam.action}`, 'System');
+          await addLog(message.author.id, 'Auto-Punish (Spam)', `Action: ${config.antiSpam.action}`, 'System', 'System');
           await logToChannel(message.guild, 'Auto-Mod', `User: ${message.author.tag} punished for spamming.\nAction: ${config.antiSpam.action}`);
         } catch (err) {
           console.error('Anti-spam punishment failed:', err);
@@ -629,6 +670,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply({ ephemeral: true });
 
         let finalImageUrl = attachment.url;
+        let storagePath = null;
 
         // Download and Upload to Supabase
         try {
@@ -636,28 +678,18 @@ client.on('interactionCreate', async interaction => {
           const fileExt = attachment.name.split('.').pop();
           const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
           
-          const { error } = await supabase.storage
-            .from('reports')
-            .upload(fileName, response.data, {
-              contentType: attachment.contentType,
-              upsert: false
-            });
-
-          if (error) throw error;
-
-          const { data: { publicUrl } } = supabase.storage
-            .from('reports')
-            .getPublicUrl(fileName);
-          
-          finalImageUrl = publicUrl;
+          const uploadResult = await uploadToSupabase(response.data, fileName, attachment.contentType);
+          if (uploadResult) {
+            finalImageUrl = uploadResult.publicUrl;
+            storagePath = uploadResult.storagePath;
+          }
         } catch (uploadError) {
-          console.error('Error uploading to Supabase:', uploadError);
-          // Fallback to original URL if upload fails
+          console.error('Error processing attachment:', uploadError);
         }
 
         await pool.query(
-          'INSERT INTO reports (reporter_id, reported_id, reason, image_url) VALUES ($1, $2, $3, $4)',
-          [interaction.user.id, reportedUser.id, reason, finalImageUrl]
+          'INSERT INTO reports (reporter_id, reported_id, reason, image_url, storage_path) VALUES ($1, $2, $3, $4, $5)',
+          [interaction.user.id, reportedUser.id, reason, finalImageUrl, storagePath]
         );
 
         const embed = createCustomEmbed(config.customEmbeds.reportFeedback || {
@@ -905,9 +937,8 @@ app.post('/api/config', async (req, res) => {
 });
 
 app.get('/api/logs', async (req, res) => {
-  const { startDate, endDate, limit, offset } = req.query;
+  const { startDate, endDate, limit, offset, type } = req.query;
   try {
-    let query = 'SELECT * FROM logs';
     const params = [];
     const conditions = [];
 
@@ -919,24 +950,51 @@ app.get('/api/logs', async (req, res) => {
       params.push(endDate);
       conditions.push(`timestamp <= $${params.length}`);
     }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
+    if (type && type !== 'all') {
+      params.push(type);
+      conditions.push(`type = $${params.length}`);
     }
 
-    query += ' ORDER BY timestamp DESC';
+    const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
 
-    if (limit) {
-      params.push(parseInt(limit));
-      query += ` LIMIT $${params.length}`;
-    }
-    if (offset) {
-      params.push(parseInt(offset));
-      query += ` OFFSET $${params.length}`;
-    }
+    // Count total
+    const totalResult = await pool.query(`SELECT COUNT(*) FROM logs${whereClause}`, params);
+    const total = parseInt(totalResult.rows[0].count);
+
+    // Fetch logs
+    let query = `SELECT * FROM logs${whereClause} ORDER BY timestamp DESC`;
+    
+    const limitInt = parseInt(limit) || 20;
+    const offsetInt = parseInt(offset) || 0;
+
+    params.push(limitInt);
+    query += ` LIMIT $${params.length}`;
+    
+    params.push(offsetInt);
+    query += ` OFFSET $${params.length}`;
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+
+    const logs = await Promise.all(result.rows.map(async (log) => {
+      const user = await client.users.fetch(log.user_id).catch(() => null);
+      return {
+        id: log.id,
+        action: log.action,
+        userId: log.user_id,
+        username: user ? user.username : 'Desconhecido',
+        moderator: log.moderator,
+        reason: log.reason,
+        timestamp: log.timestamp,
+        type: log.type,
+        duration: log.duration
+      };
+    }));
+
+    res.json({
+      logs,
+      total,
+      hasMore: offsetInt + logs.length < total
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1100,41 +1158,38 @@ app.post('/api/users/reload/:userId', async (req, res) => {
 });
 
 app.get('/api/reports', async (req, res) => {
-  try {
-    const { status } = req.query;
-    let query = 'SELECT * FROM reports';
-    const params = [];
+  // ... (previous implementation)
+});
 
-    if (status) {
-      params.push(status);
-      query += ' WHERE status = $1';
-    } else {
-      query += " WHERE status != 'deleted'";
+app.post('/api/reports', upload.single('image'), async (req, res) => {
+  const { reportedUserId, reportedUsername, reason } = req.body;
+  const reporterId = req.user?.id || 'Dashboard';
+
+  if (!reportedUserId || !reason) {
+    return res.status(400).json({ error: 'Missing reportedUserId or reason' });
+  }
+
+  try {
+    let imageUrl = null;
+    let storagePath = null;
+
+    if (req.file) {
+      const fileExt = req.file.originalname.split('.').pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const uploadResult = await uploadToSupabase(req.file.buffer, fileName, req.file.mimetype);
+      
+      if (uploadResult) {
+        imageUrl = uploadResult.publicUrl;
+        storagePath = uploadResult.storagePath;
+      }
     }
 
-    query += ' ORDER BY timestamp DESC';
-    const result = await pool.query(query, params);
-    
-    const reportsWithDetails = await Promise.all(result.rows.map(async (report) => {
-      const reporter = await client.users.fetch(report.reporter_id).catch(() => null);
-      const reported = await client.users.fetch(report.reported_id).catch(() => null);
+    const result = await pool.query(
+      'INSERT INTO reports (reporter_id, reported_id, reason, image_url, storage_path) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [reporterId, reportedUserId, reason, imageUrl, storagePath]
+    );
 
-      return {
-        ...report,
-        reporter: reporter ? {
-          username: reporter.username,
-          avatarURL: reporter.displayAvatarURL(),
-          id: reporter.id
-        } : { username: "Desconhecido", id: report.reporter_id },
-        reported: reported ? {
-          username: reported.username,
-          avatarURL: reported.displayAvatarURL(),
-          id: reported.id
-        } : { username: "Desconhecido", id: report.reported_id }
-      };
-    }));
-
-    res.json(reportsWithDetails);
+    res.json({ success: true, report: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1187,7 +1242,7 @@ app.post('/api/reports/:id/resolve', async (req, res) => {
         break;
     }
 
-    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard');
+    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard', 'Admin', duration);
     await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [id]);
 
     // Send to punishments channel
@@ -1609,7 +1664,7 @@ app.post('/api/moderate/:action', async (req, res) => {
         return res.status(400).json({ error: 'Invalid action' });
     }
 
-    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard');
+    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Admin', duration);
     
     // Log to standard channel
     await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
