@@ -1300,6 +1300,67 @@ app.delete('/api/reports/:id', async (req, res) => {
   }
 });
 
+app.post('/api/reports/bulk-delete', async (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'IDs inválidos' });
+
+  try {
+    // Permanent delete if they are already in the trash
+    const { rows: currentReports } = await pool.query('SELECT id, status, image_url FROM reports WHERE id = ANY($1)', [ids]);
+    
+    const reportsInTrash = currentReports.filter(r => r.status === 'deleted');
+    const reportsToTrash = currentReports.filter(r => r.status !== 'deleted');
+
+    let deletedCount = 0;
+
+    // 1. Permanent delete for those already in trash
+    if (reportsInTrash.length > 0) {
+      const trashIds = reportsInTrash.map(r => r.id);
+      
+      // Cleanup images
+      for (const report of reportsInTrash) {
+        if (report.image_url && report.image_url.includes('storage/v1/object/public/reports/')) {
+          const fileName = report.image_url.split('/').pop();
+          await supabase.storage.from('reports').remove([fileName]).catch(console.error);
+        }
+      }
+      
+      await pool.query('DELETE FROM reports WHERE id = ANY($1)', [trashIds]);
+      deletedCount += reportsInTrash.length;
+    }
+
+    // 2. Soft delete for those not in trash
+    if (reportsToTrash.length > 0) {
+      const activeIds = reportsToTrash.map(r => r.id);
+      await pool.query("UPDATE reports SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP WHERE id = ANY($1)", [activeIds]);
+      deletedCount += reportsToTrash.length;
+    }
+
+    res.json({ success: true, message: `${deletedCount} reportes processados.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/reports/trash/clear', async (req, res) => {
+  try {
+    const { rows: reportsToDelete } = await pool.query("SELECT image_url FROM reports WHERE status = 'deleted'");
+    
+    // Cleanup images
+    for (const report of reportsToDelete) {
+      if (report.image_url && report.image_url.includes('storage/v1/object/public/reports/')) {
+        const fileName = report.image_url.split('/').pop();
+        await supabase.storage.from('reports').remove([fileName]).catch(console.error);
+      }
+    }
+
+    const result = await pool.query("DELETE FROM reports WHERE status = 'deleted'");
+    res.json({ success: true, message: `Lixeira limpa. ${result.rowCount} reportes removidos.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/moderation/punishments', async (req, res) => {
   try {
     const authorizedGuildId = "1438658038612623534";
