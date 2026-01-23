@@ -809,6 +809,33 @@ app.get('/api/users/search', async (req, res) => {
   }
 });
 
+app.get('/api/users', async (req, res) => {
+  try {
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    
+    if (!guild) {
+      return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
+    }
+
+    // Fetch all members (limit to 1000 for safety, or fetch all if needed)
+    const members = await guild.members.fetch();
+    const results = members.map(m => ({
+      id: m.user.id,
+      username: m.user.username,
+      globalName: m.user.globalName,
+      displayName: m.displayName,
+      avatar: m.user.avatar, // Added for the frontend helper
+      avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 })
+    }));
+
+    res.json(results);
+  } catch (err) {
+    console.error('Get all users error:', err);
+    res.status(500).json({ error: 'Erro ao listar usuários.' });
+  }
+});
+
 app.get('/api/reports', async (req, res) => {
   try {
     const { status } = req.query;
