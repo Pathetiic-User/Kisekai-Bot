@@ -896,7 +896,9 @@ app.get('/api/access', async (req, res) => {
         return {
           id: row.user_id,
           username: user.username,
+          globalName: user.globalName,
           avatar: user.avatar,
+          avatarURL: user.displayAvatarURL({ size: 256 }),
           grantedAt: row.granted_at,
           isAdmin: row.is_admin
         };
@@ -904,7 +906,9 @@ app.get('/api/access', async (req, res) => {
         return {
           id: row.user_id,
           username: 'Usuário Desconhecido',
+          globalName: null,
           avatar: null,
+          avatarURL: null,
           grantedAt: row.granted_at,
           isAdmin: row.is_admin
         };
@@ -971,6 +975,19 @@ app.post('/api/access/revoke', async (req, res) => {
     }
 
     res.json({ success: true, message: 'Acesso revogado e cargo removido.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/access/:userId/logs', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await pool.query(
+      "SELECT * FROM logs WHERE user_id = $1 AND action IN ('Login Dashboard', 'Logout Dashboard', 'Admin logou no dashboard') ORDER BY timestamp DESC LIMIT 50",
+      [userId]
+    );
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
