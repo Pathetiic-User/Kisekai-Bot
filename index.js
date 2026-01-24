@@ -987,7 +987,7 @@ app.post('/api/config', async (req, res) => {
 });
 
 app.get('/api/logs', async (req, res) => {
-  const { startDate, endDate, limit, offset, type } = req.query;
+  const { startDate, endDate, limit, offset, type, userId } = req.query;
   try {
     const params = [];
     const conditions = [];
@@ -1003,6 +1003,10 @@ app.get('/api/logs', async (req, res) => {
     if (type && type !== 'all') {
       params.push(type);
       conditions.push(`type = $${params.length}`);
+    }
+    if (userId) {
+      params.push(userId);
+      conditions.push(`user_id = $${params.length}`);
     }
 
     const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
@@ -1573,6 +1577,38 @@ app.get('/api/moderation/punishments', async (req, res) => {
   }
 });
 
+app.get('/api/moderation/punished-users', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT ON (user_id) user_id, timestamp
+      FROM logs
+      WHERE type = 'Administrativa'
+      ORDER BY user_id, timestamp DESC
+    `);
+
+    const users = await Promise.all(result.rows.map(async (row) => {
+      try {
+        const user = await client.users.fetch(row.user_id);
+        return {
+          id: user.id,
+          username: user.username,
+          avatarURL: user.displayAvatarURL()
+        };
+      } catch (e) {
+        return {
+          id: row.user_id,
+          username: 'Unknown',
+          avatarURL: null
+        };
+      }
+    }));
+
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/moderation/unban', async (req, res) => {
   const { userId } = req.body;
   try {
@@ -1642,7 +1678,7 @@ app.get('/api/moderation/history', async (req, res) => {
 app.get('/api/moderation/history/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const result = await pool.query("SELECT * FROM logs WHERE user_id = $1 AND action = 'Warning' ORDER BY timestamp DESC", [userId]);
+    const result = await pool.query("SELECT * FROM logs WHERE user_id = $1 ORDER BY timestamp DESC", [userId]);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
