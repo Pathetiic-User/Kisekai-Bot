@@ -90,7 +90,7 @@ const authMiddleware = async (req, res, next) => {
       
       // Verificar se o usuário ainda tem o cargo obrigatório ou é o dono
       const authorizedGuildId = "1438658038612623534";
-      const dashboardRoleID = "1464264578773811301";
+      const dashboardRoleID = config.adminRole || "1464264578773811301";
       const guild = client.guilds.cache.get(authorizedGuildId);
       
       let hasRealTimeAccess = false;
@@ -108,7 +108,7 @@ const authMiddleware = async (req, res, next) => {
       if (hasRealTimeAccess) {
         req.user = decoded;
         // Log access
-        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System', 'System').catch(console.error);
+        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System', 'Administrador').catch(console.error);
         return next();
       }
       return res.status(403).json({ error: 'Acesso negado: Você não tem o cargo necessário para acessar o dashboard.' });
@@ -252,9 +252,9 @@ async function initDb() {
           ALTER TABLE reports ADD COLUMN deleted_at TIMESTAMPTZ;
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='type') THEN
-          ALTER TABLE logs ADD COLUMN type TEXT DEFAULT 'Admin';
+          ALTER TABLE logs ADD COLUMN type TEXT DEFAULT 'Administrador';
         ELSE
-          UPDATE logs SET type = 'Admin' WHERE type = 'Moderation';
+          UPDATE logs SET type = 'Administrador' WHERE type = 'Admin';
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='storage_path') THEN
           ALTER TABLE reports ADD COLUMN storage_path TEXT;
@@ -269,25 +269,36 @@ async function initDb() {
     if (res.rows.length === 0) {
       config = {
         prefix: "/",
+        autoRole: "1464397173167882334",
         messages: {},
         antiSpam: { enabled: false, interval: 2000, limit: 5, action: "mute", autoPunish: true },
         punishChats: [],
         reportChannel: "1463183940809392269",
         punishmentChannel: "1463186111458443450",
         sweepstakeChannel: "1464266529058193429",
-        adminRole: "",
+        adminRole: "1464264578773811301",
         customEmbeds: {
           welcome: { enabled: false, channel: "1438658039656743024", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
-          warmute: { enabled: false, title: "Aviso de Mute", description: "Você foi mutado por spam.", color: "#ff0000" },
           reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" },
-          resolvedReport: { enabled: true, title: "✅ Reporte Bem-Sucedido", description: "Um reporte foi analisado e o usuário foi punido.", color: "#00ff00", fields: [{ name: "👤 Usuário Punido", value: "{reported_tag}", inline: true }, { name: "🚩 Motivo", value: "{reason}", inline: false }] },
-          punishment: { enabled: true, title: "⚖️ Nova Punição: {action}", color: "#ff0000", fields: [{ name: "👤 Punido", value: "{user_tag}", inline: true }, { name: "🛡️ Moderador", value: "{moderator}", inline: true }, { name: "📝 Motivo", value: "{reason}", inline: false }, { name: "⏳ Duração", value: "{duration}", inline: true }] },
-          logs: { enabled: true, title: "[{type}]", description: "{description}", color: "#ffff00" }
+          resolvedReport: { enabled: true, title: "✅ Reporte Bem-Sucedido", description: "Um reporte foi analisado e o usuário foi punido.", color: "#00ff00", fields: [{ name: "👤 Usuário Punido", value: "{reported_tag}", inline: true }, { name: "🚩 Motivo", value: "{reason}", inline: false }] }
         }
       };
       await client.query('INSERT INTO configs (data) VALUES ($1)', [config]);
     } else {
       config = res.rows[0].data;
+      // Ensure requested defaults are set even in existing config if they were empty
+      let updated = false;
+      if (!config.adminRole || config.adminRole === "") {
+        config.adminRole = "1464264578773811301";
+        updated = true;
+      }
+      if (!config.autoRole || config.autoRole === "") {
+        config.autoRole = "1464397173167882334";
+        updated = true;
+      }
+      if (updated) {
+        await saveConfig();
+      }
     }
 
     // Limpeza periódica de reportes (30 dias na lixeira)
@@ -329,11 +340,16 @@ async function saveConfig() {
   await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
 }
 
-async function addLog(userId, action, reason, moderator, type = 'Admin', duration = null) {
-  await pool.query(
-    'INSERT INTO logs (user_id, action, reason, moderator, type, duration) VALUES ($1, $2, $3, $4, $5, $6)',
-    [userId, action, reason, moderator, type, duration]
-  );
+async function addLog(userId, action, reason, moderator, type = 'Administrador', duration = null) {
+  try {
+    await pool.query(
+      'INSERT INTO logs (user_id, action, reason, moderator, type, duration) VALUES ($1, $2, $3, $4, $5, $6)',
+      [userId, action, reason, moderator, type, duration]
+    );
+  } catch (err) {
+    console.error('Error in addLog:', err);
+    throw err;
+  }
 }
 
 function getMessage(key, placeholders = {}) {
@@ -438,7 +454,7 @@ function createCustomEmbed(data, placeholders = {}) {
   return embed;
 }
 
-client.on('clientReady', async () => {
+client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
   
   // Security: Leave unauthorized guilds
@@ -998,6 +1014,7 @@ app.get('/api/logs', async (req, res) => {
         action: log.action,
         userId: log.user_id,
         username: user ? user.username : 'Desconhecido',
+        avatarURL: user ? user.displayAvatarURL() : null,
         moderator: log.moderator,
         reason: log.reason,
         timestamp: log.timestamp,
@@ -1047,6 +1064,20 @@ app.get('/api/stats', async (req, res) => {
     gatewayStatus: gatewayStatusMap[client.ws.status] || 'Desconhecido',
     dbStatus: dbHealthy ? 'Saudável' : 'Instável'
   });
+});
+
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await client.users.fetch(req.params.id);
+    res.json({
+      id: user.id,
+      username: user.username,
+      avatar: user.avatar,
+      avatarURL: user.displayAvatarURL()
+    });
+  } catch (err) {
+    res.status(404).json({ error: 'Usuário não encontrado' });
+  }
 });
 
 app.get('/api/users/search', async (req, res) => {
@@ -1174,7 +1205,44 @@ app.post('/api/users/reload/:userId', async (req, res) => {
 });
 
 app.get('/api/reports', async (req, res) => {
-  // ... (previous implementation)
+  try {
+    const { status } = req.query;
+    let query = 'SELECT * FROM reports';
+    const params = [];
+
+    if (status && status !== 'all') {
+      params.push(status);
+      query += ' WHERE status = $1';
+    } else {
+      query += " WHERE status != 'deleted'";
+    }
+
+    query += ' ORDER BY timestamp DESC';
+    const result = await pool.query(query, params);
+
+    const reports = await Promise.all(result.rows.map(async (report) => {
+      const reporter = await client.users.fetch(report.reporter_id).catch(() => null);
+      const reported = await client.users.fetch(report.reported_id).catch(() => null);
+
+      return {
+        ...report,
+        reporter: {
+          id: report.reporter_id,
+          username: reporter ? reporter.username : 'Desconhecido',
+          avatarURL: reporter ? reporter.displayAvatarURL() : null
+        },
+        reported: {
+          id: report.reported_id,
+          username: reported ? reported.username : 'Desconhecido',
+          avatarURL: reported ? reported.displayAvatarURL() : null
+        }
+      };
+    }));
+
+    res.json(reports);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/reports', upload.single('image'), async (req, res) => {
@@ -1239,7 +1307,7 @@ app.post('/api/reports/:id/resolve', async (req, res) => {
 
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-    let actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
+    let actionLabel = action; // Use lowercase to match frontend
     
     switch (action) {
       case 'kick':
@@ -1254,15 +1322,29 @@ app.post('/api/reports/:id/resolve', async (req, res) => {
         await member.timeout(duration ? ms(duration) : ms('10m'), reason || 'Muted via Report Resolution');
         break;
       case 'warn':
-        actionLabel = 'Warning';
+        // Warn is already set to 'warn'
+        try {
+          const warnEmbed = new EmbedBuilder()
+            .setTitle('⚠️ Advertência Recebida')
+            .setDescription(`Você recebeu uma advertência no servidor **${guild.name}**.`)
+            .addFields(
+              { name: 'Motivo', value: reason || 'Punição via Reporte' },
+              { name: 'Moderador', value: moderator || 'Dashboard' }
+            )
+            .setColor('#ffff00')
+            .setTimestamp();
+          await user.send({ embeds: [warnEmbed] });
+        } catch (e) {
+          console.error(`Não foi possível enviar DM para ${user.tag}`);
+        }
         break;
     }
 
-    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard', 'Admin', duration);
+    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard', 'Administrador', duration);
     await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [id]);
 
-    // Send to punishments channel
-    if (config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
+    // Send to punishments channel (Skip if action is warn)
+    if (action !== 'warn' && config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
       const punChannel = guild.channels.cache.get(config.punishmentChannel);
       if (punChannel) {
         const embed = createCustomEmbed(config.customEmbeds.punishment, {
@@ -1481,8 +1563,17 @@ app.post('/api/moderation/unban', async (req, res) => {
 
 app.get('/api/moderation/history', async (req, res) => {
   try {
-    const kicks = await pool.query("SELECT * FROM logs WHERE action = 'Kick' ORDER BY timestamp DESC");
-    const warns = await pool.query("SELECT * FROM logs WHERE action = 'Warning' ORDER BY timestamp DESC");
+    const kicksRaw = await pool.query("SELECT * FROM logs WHERE action ILIKE 'kick' ORDER BY timestamp DESC");
+    const kicks = await Promise.all(kicksRaw.rows.map(async (row) => {
+      try {
+        const user = await client.users.fetch(row.user_id);
+        return { ...row, username: user.username, avatarURL: user.displayAvatarURL() };
+      } catch (e) {
+        return { ...row, username: 'Unknown', avatarURL: null };
+      }
+    }));
+
+    const warns = await pool.query("SELECT * FROM logs WHERE action ILIKE 'warn%' ORDER BY timestamp DESC");
     
     // Group warnings by user
     const warnHistory = {};
@@ -1500,6 +1591,7 @@ app.get('/api/moderation/history', async (req, res) => {
           warnHistory[row.user_id] = {
             userId: row.user_id,
             username: 'Unknown',
+            avatarURL: null,
             warnings: []
           };
         }
@@ -1513,7 +1605,7 @@ app.get('/api/moderation/history', async (req, res) => {
     }
 
     res.json({ 
-      kicks: kicks.rows, 
+      kicks, 
       warnHistory: Object.values(warnHistory) 
     });
   } catch (err) {
@@ -1643,9 +1735,10 @@ app.get('/api/sweepstakes/check-link/:userId', async (req, res) => {
   }
 });
 
-app.post('/api/moderate/:action', async (req, res) => {
+app.post('/api/moderate/:action', upload.single('evidence'), async (req, res) => {
   const { action } = req.params;
-  const { userId, reason, duration, moderator, evidenceUrl, reporterId } = req.body;
+  const { userId, reason, duration, moderator, reporterId } = req.body;
+  let { evidenceUrl } = req.body;
   const guildId = client.guilds.cache.first()?.id;
 
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
@@ -1659,7 +1752,17 @@ app.post('/api/moderate/:action', async (req, res) => {
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    let actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
+    // Handle file upload if present
+    if (req.file) {
+      const fileExt = req.file.originalname.split('.').pop();
+      const fileName = `mod-${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const uploadResult = await uploadToSupabase(req.file.buffer, fileName, req.file.mimetype);
+      if (uploadResult) {
+        evidenceUrl = uploadResult.publicUrl;
+      }
+    }
+
+    let actionLabel = action;
     
     switch (action) {
       case 'kick':
@@ -1674,19 +1777,33 @@ app.post('/api/moderate/:action', async (req, res) => {
         await member.timeout(duration ? ms(duration) : ms('10m'), reason || 'Muted via Dashboard');
         break;
       case 'warn':
-        actionLabel = 'Warning';
+        // actionLabel is already 'warn'
+        try {
+          const warnEmbed = new EmbedBuilder()
+            .setTitle('⚠️ Advertência Recebida')
+            .setDescription(`Você recebeu uma advertência no servidor **${guild.name}**.`)
+            .addFields(
+              { name: 'Motivo', value: reason || 'Não informado' },
+              { name: 'Moderador', value: moderator || 'Dashboard' }
+            )
+            .setColor('#ffff00')
+            .setTimestamp();
+          await user.send({ embeds: [warnEmbed] });
+        } catch (e) {
+          console.error(`Não foi possível enviar DM para ${user.tag}`);
+        }
         break;
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
 
-    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Admin', duration);
+    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Administrador', duration);
     
     // Log to standard channel
     await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
 
-    // Log to Punishments Channel
-    if (config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
+    // Log to Punishments Channel (Skip if action is warn)
+    if (action !== 'warn' && config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
       const punChannel = guild.channels.cache.get(config.punishmentChannel);
       if (punChannel) {
         const embed = createCustomEmbed(config.customEmbeds.punishment, {
