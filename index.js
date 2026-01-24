@@ -107,8 +107,6 @@ const authMiddleware = async (req, res, next) => {
 
       if (hasRealTimeAccess) {
         req.user = decoded;
-        // Log access
-        await addLog(decoded.id, 'Dashboard Access', `Acessou o dashboard`, 'System', 'Administrador').catch(console.error);
         return next();
       }
       return res.status(403).json({ error: 'Acesso negado: Você não tem o cargo necessário para acessar o dashboard.' });
@@ -252,12 +250,15 @@ async function initDb() {
           ALTER TABLE reports ADD COLUMN deleted_at TIMESTAMPTZ;
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='type') THEN
-          ALTER TABLE logs ADD COLUMN type TEXT DEFAULT 'Administrador';
+          ALTER TABLE logs ADD COLUMN type TEXT DEFAULT 'Administrativa';
         ELSE
-          UPDATE logs SET type = 'Administrador' WHERE type = 'Admin';
+          UPDATE logs SET type = 'Administrativa' WHERE type = 'Admin' OR type = 'Administrador';
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='storage_path') THEN
           ALTER TABLE reports ADD COLUMN storage_path TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='rejected_at') THEN
+          ALTER TABLE reports ADD COLUMN rejected_at TIMESTAMPTZ;
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='duration') THEN
           ALTER TABLE logs ADD COLUMN duration TEXT;
@@ -301,9 +302,15 @@ async function initDb() {
       }
     }
 
-    // Limpeza periódica de reportes (30 dias na lixeira)
+    // Limpeza periódica de reportes
     const cleanupReports = async () => {
       try {
+        // 1. Mover reportes reprovados para a lixeira após 7 dias
+        await pool.query(
+          "UPDATE reports SET status = 'deleted', deleted_at = NOW() WHERE status = 'rejected' AND rejected_at < NOW() - INTERVAL '7 days'"
+        );
+
+        // 2. Limpeza permanente (30 dias na lixeira)
         const { rows: reportsToDelete } = await pool.query(
           "SELECT image_url FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'"
         );
@@ -316,9 +323,9 @@ async function initDb() {
         }
 
         await pool.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
-        console.log('Limpeza de lixeira de reportes concluída.');
+        console.log('Limpeza de reportes concluída.');
       } catch (err) {
-        console.error('Erro na limpeza da lixeira:', err);
+        console.error('Erro na limpeza de reportes:', err);
       }
     };
 
@@ -340,7 +347,7 @@ async function saveConfig() {
   await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
 }
 
-async function addLog(userId, action, reason, moderator, type = 'Administrador', duration = null) {
+async function addLog(userId, action, reason, moderator, type = 'Administrativa', duration = null) {
   try {
     await pool.query(
       'INSERT INTO logs (user_id, action, reason, moderator, type, duration) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -816,6 +823,10 @@ app.get('/api/auth/callback', async (req, res) => {
       }
     }
 
+    if (hasAccess) {
+      await addLog(userData.id, 'Login Dashboard', `Admin logou no dashboard`, 'System', 'System').catch(console.error);
+    }
+
     const token = jwt.sign({ 
       id: userData.id, 
       username: userData.username, 
@@ -861,7 +872,14 @@ app.get('/api/auth/me', (req, res) => {
   }
 });
 
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/auth/logout', async (req, res) => {
+  const token = req.cookies.token;
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      await addLog(decoded.id, 'Logout Dashboard', `Usuário saiu do dashboard`, 'System', 'System').catch(console.error);
+    } catch (e) {}
+  }
   res.clearCookie('token');
   res.json({ success: true });
 });
@@ -1293,7 +1311,7 @@ app.post('/api/reports/:id/resolve', async (req, res) => {
     const report = reportResult.rows[0];
 
     if (action === 'reject') {
-      await pool.query("UPDATE reports SET status = 'rejected' WHERE id = $1", [id]);
+      await pool.query("UPDATE reports SET status = 'rejected', rejected_at = CURRENT_TIMESTAMP WHERE id = $1", [id]);
       return res.json({ success: true, message: 'Reporte rejeitado' });
     }
 
@@ -1340,7 +1358,7 @@ app.post('/api/reports/:id/resolve', async (req, res) => {
         break;
     }
 
-    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard', 'Administrador', duration);
+    await addLog(report.reported_id, actionLabel, reason || 'Punição via Reporte', moderator || 'Dashboard', 'Administrativa', duration);
     await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [id]);
 
     // Send to punishments channel (Skip if action is warn)
@@ -1376,10 +1394,18 @@ app.patch('/api/reports/:id/status', async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
-      'UPDATE reports SET status = $1 WHERE id = $2 RETURNING *',
-      [status, id]
-    );
+    let query = 'UPDATE reports SET status = $1';
+    const params = [status, id];
+
+    if (status === 'rejected') {
+      query += ', rejected_at = CURRENT_TIMESTAMP';
+    } else {
+      query += ', rejected_at = NULL';
+    }
+
+    query += ' WHERE id = $2 RETURNING *';
+
+    const result = await pool.query(query, params);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Reporte não encontrado' });
@@ -1737,7 +1763,7 @@ app.get('/api/sweepstakes/check-link/:userId', async (req, res) => {
 
 app.post('/api/moderate/:action', upload.single('evidence'), async (req, res) => {
   const { action } = req.params;
-  const { userId, reason, duration, moderator, reporterId } = req.body;
+  const { userId, reason, duration, moderator, reporterId, reportId } = req.body;
   let { evidenceUrl } = req.body;
   const guildId = client.guilds.cache.first()?.id;
 
@@ -1793,31 +1819,46 @@ app.post('/api/moderate/:action', upload.single('evidence'), async (req, res) =>
           console.error(`Não foi possível enviar DM para ${user.tag}`);
         }
         break;
+      case 'innocent':
+        // No action needed for Discord user, just database log and report resolution
+        actionLabel = 'innocent';
+        break;
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
 
-    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Administrador', duration);
+    await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Administrativa', duration);
     
-    // Log to standard channel
-    await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
+    // Update report status if reportId is provided
+    if (reportId) {
+      if (action === 'innocent') {
+        await pool.query("UPDATE reports SET status = 'rejected', rejected_at = CURRENT_TIMESTAMP WHERE id = $1", [reportId]);
+      } else {
+        await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [reportId]);
+      }
+    }
 
-    // Log to Punishments Channel (Skip if action is warn)
-    if (action !== 'warn' && config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
-      const punChannel = guild.channels.cache.get(config.punishmentChannel);
-      if (punChannel) {
-        const embed = createCustomEmbed(config.customEmbeds.punishment, {
-          action: actionLabel,
-          user_tag: user.tag,
-          user_id: userId,
-          moderator: moderator || 'Dashboard',
-          reason: reason || 'Não informado',
-          duration: duration || 'N/A',
-          reporter_id: reporterId || 'N/A'
-        });
+    // Log to standard channel (Only for punishments)
+    if (action !== 'innocent') {
+      await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
 
-        if (evidenceUrl) embed.setImage(evidenceUrl);
-        await punChannel.send({ embeds: [embed] });
+      // Log to Punishments Channel (Skip if action is warn)
+      if (action !== 'warn' && config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
+        const punChannel = guild.channels.cache.get(config.punishmentChannel);
+        if (punChannel) {
+          const embed = createCustomEmbed(config.customEmbeds.punishment, {
+            action: actionLabel,
+            user_tag: user.tag,
+            user_id: userId,
+            moderator: moderator || 'Dashboard',
+            reason: reason || 'Não informado',
+            duration: duration || 'N/A',
+            reporter_id: reporterId || 'N/A'
+          });
+
+          if (evidenceUrl) embed.setImage(evidenceUrl);
+          await punChannel.send({ embeds: [embed] });
+        }
       }
     }
 
