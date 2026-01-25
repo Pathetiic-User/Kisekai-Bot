@@ -1101,47 +1101,58 @@ app.get('/api/stats', async (req, res) => {
   }
 
   const gatewayStatusMap = {
-    0: 'Online',
-    1: 'Conectando',
-    2: 'Reconectando',
-    3: 'Inativo',
-    4: 'Inicializando',
-    5: 'Desconectado',
-    6: 'Aguardando Guildas',
-    7: 'Identificando',
-    8: 'Retomando'
+    0: 'Online', 1: 'Conectando', 2: 'Reconectando', 3: 'Inativo',
+    4: 'Inicializando', 5: 'Desconectado', 6: 'Aguardando Guildas',
+    7: 'Identificando', 8: 'Retomando'
   };
 
   const authorizedGuildId = "1438658038612623534";
   let guild = client.guilds.cache.get(authorizedGuildId);
   
-  // Garantir que temos os membros e presenças em cache (fetch a cada 2 minutos no máximo)
-  if (guild && (!guild.members.cache.size || guild.members.cache.size <= 1 || (Date.now() - (guild.lastMemberFetch || 0) > 120000))) {
+  if (guild) {
+    // Garantir que os dados do servidor (boosts, etc) estejam atualizados
     try {
-      await guild.members.fetch({ withPresences: true });
-      guild.lastMemberFetch = Date.now();
+      await guild.fetch();
     } catch (e) {
-      console.error("Erro ao carregar membros:", e);
+      console.error("Erro ao atualizar guilda:", e);
+    }
+
+    // Garantir membros e presenças em cache (fetch a cada 1 minuto para maior precisão no dashboard)
+    if (!guild.lastMemberFetch || (Date.now() - guild.lastMemberFetch > 60000)) {
+      try {
+        await guild.members.fetch({ withPresences: true });
+        guild.lastMemberFetch = Date.now();
+      } catch (e) {
+        console.error("Erro ao carregar membros:", e);
+      }
     }
   }
+
+  // Filtragem precisa de humanos e bots
+  const allMembers = guild ? guild.members.cache : new Collection();
+  const humanMembers = allMembers.filter(m => !m.user.bot);
+  const botMembers = allMembers.filter(m => m.user.bot);
+  
+  const onlineHumans = humanMembers.filter(m => m.presence?.status && m.presence.status !== 'offline').size;
+  const offlineHumans = humanMembers.size - onlineHumans;
 
   const serverInfo = guild ? {
     id: guild.id,
     name: guild.name,
     icon: guild.iconURL({ dynamic: true }),
     memberCount: guild.memberCount,
-    onlineCount: guild.members.cache.filter(m => m.presence?.status && m.presence.status !== 'offline').size,
-    offlineCount: guild.memberCount - guild.members.cache.filter(m => m.presence?.status && m.presence.status !== 'offline').size,
-    botCount: guild.members.cache.filter(m => m.user.bot).size,
+    onlineCount: onlineHumans,
+    offlineCount: offlineHumans,
+    botCount: botMembers.size,
     boostCount: guild.premiumSubscriptionCount || 0,
     channelCount: guild.channels.cache.size
   } : null;
 
   res.json({
     servers: client.guilds.cache.size,
-    users: guild ? guild.members.cache.filter(m => !m.user.bot).size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => !m.user.bot).size, 0),
-    onlineUsers: guild ? guild.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size, 0),
-    botCount: guild ? guild.members.cache.filter(m => m.user.bot).size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => m.user.bot).size, 0),
+    users: humanMembers.size,
+    onlineUsers: onlineHumans,
+    botCount: botMembers.size,
     uptime: client.uptime,
     uptimeFormatted: ms(client.uptime || 0, { long: true }),
     lastRestart: new Date(Date.now() - (client.uptime || 0)).toISOString(),
