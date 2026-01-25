@@ -534,11 +534,19 @@ client.on('guildMemberAdd', async member => {
   if (config.customEmbeds?.welcome?.enabled && config.customEmbeds.welcome.channel) {
     const channel = member.guild.channels.cache.get(config.customEmbeds.welcome.channel);
     if (channel) {
+      const botCount = member.guild.members.cache.filter(m => m.user.bot).size;
+      const humanCount = member.guild.memberCount - botCount;
+      
       const embed = createCustomEmbed(config.customEmbeds.welcome, {
         user: member.user.toString(),
         username: member.user.username,
+        userId: member.user.id,
+        userType: member.user.bot ? 'APP' : 'Membro',
+        botTag: member.user.bot ? ' [APP]' : '',
         guild: member.guild.name,
-        memberCount: member.guild.memberCount.toString()
+        memberCount: humanCount.toString(),
+        botCount: botCount.toString(),
+        totalCount: member.guild.memberCount.toString()
       });
       channel.send({ embeds: [embed] }).catch(console.error);
     }
@@ -1095,7 +1103,11 @@ app.get('/api/stats', async (req, res) => {
 
   res.json({
     servers: client.guilds.cache.size,
-    users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
+    users: client.guilds.cache.reduce((acc, guild) => {
+      const botCount = guild.members.cache.filter(m => m.user.bot).size;
+      return acc + (guild.memberCount - botCount);
+    }, 0),
+    botCount: client.guilds.cache.reduce((acc, guild) => acc + guild.members.cache.filter(m => m.user.bot).size, 0),
     uptime: client.uptime,
     uptimeFormatted: ms(client.uptime || 0, { long: true }),
     lastRestart: new Date(Date.now() - (client.uptime || 0)).toISOString(),
