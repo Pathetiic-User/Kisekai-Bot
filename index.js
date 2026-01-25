@@ -213,10 +213,6 @@ async function initDb() {
         is_admin BOOLEAN DEFAULT FALSE,
         granted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
-      CREATE TABLE IF NOT EXISTS linked_accounts (
-        user_id TEXT PRIMARY KEY,
-        linked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      );
       CREATE TABLE IF NOT EXISTS sweepstakes (
         id SERIAL PRIMARY KEY,
         guild_id TEXT NOT NULL,
@@ -632,14 +628,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (new Date(sweepstake.end_time) < now) {
       await reaction.users.remove(user.id).catch(() => null);
       return user.send({ content: "❌ Este sorteio já encerrou o período de inscrições." }).catch(() => null);
-    }
-
-    // Check link
-    const linkCheck = await pool.query('SELECT * FROM linked_accounts WHERE user_id = $1', [user.id]);
-    if (linkCheck.rows.length === 0) {
-      await reaction.users.remove(user.id).catch(() => null);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
-      return user.send({ content: `❌ Você precisa vincular sua conta ao bot para participar! Clique aqui: ${frontendUrl}/sweepstakes` }).catch(() => null);
     }
 
     // Check max participants
@@ -1917,27 +1905,6 @@ app.delete('/api/sweepstakes/:id', async (req, res) => {
     }
     await pool.query('DELETE FROM sweepstakes WHERE id = $1', [req.params.id]);
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/sweepstakes/link-account', async (req, res) => {
-  const { userId } = req.body; // In real app, get from req.user
-  if (!userId) return res.status(400).json({ error: 'Missing userId' });
-
-  try {
-    await pool.query('INSERT INTO linked_accounts (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [userId]);
-    res.json({ success: true, message: 'Conta vinculada com sucesso!' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/sweepstakes/check-link/:userId', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM linked_accounts WHERE user_id = $1', [req.params.userId]);
-    res.json({ linked: result.rows.length > 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
