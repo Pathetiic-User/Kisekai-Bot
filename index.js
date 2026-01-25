@@ -1112,23 +1112,43 @@ app.get('/api/stats', async (req, res) => {
     8: 'Retomando'
   };
 
+  const authorizedGuildId = "1438658038612623534";
+  let guild = client.guilds.cache.get(authorizedGuildId);
+  
+  // Garantir que temos os membros e presenças em cache (fetch a cada 2 minutos no máximo)
+  if (guild && (!guild.members.cache.size || guild.members.cache.size <= 1 || (Date.now() - (guild.lastMemberFetch || 0) > 120000))) {
+    try {
+      await guild.members.fetch({ withPresences: true });
+      guild.lastMemberFetch = Date.now();
+    } catch (e) {
+      console.error("Erro ao carregar membros:", e);
+    }
+  }
+
+  const serverInfo = guild ? {
+    id: guild.id,
+    name: guild.name,
+    icon: guild.iconURL({ dynamic: true }),
+    memberCount: guild.memberCount,
+    onlineCount: guild.members.cache.filter(m => m.presence?.status && m.presence.status !== 'offline').size,
+    offlineCount: guild.memberCount - guild.members.cache.filter(m => m.presence?.status && m.presence.status !== 'offline').size,
+    botCount: guild.members.cache.filter(m => m.user.bot).size,
+    boostCount: guild.premiumSubscriptionCount || 0,
+    channelCount: guild.channels.cache.size
+  } : null;
+
   res.json({
     servers: client.guilds.cache.size,
-    users: client.guilds.cache.reduce((acc, guild) => {
-      const humans = guild.members.cache.filter(m => !m.user.bot).size;
-      return acc + humans;
-    }, 0),
-    onlineUsers: client.guilds.cache.reduce((acc, guild) => {
-      const onlineHumans = guild.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size;
-      return acc + onlineHumans;
-    }, 0),
-    botCount: client.guilds.cache.reduce((acc, guild) => acc + guild.members.cache.filter(m => m.user.bot).size, 0),
+    users: guild ? guild.members.cache.filter(m => !m.user.bot).size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => !m.user.bot).size, 0),
+    onlineUsers: guild ? guild.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size, 0),
+    botCount: guild ? guild.members.cache.filter(m => m.user.bot).size : client.guilds.cache.reduce((acc, g) => acc + g.members.cache.filter(m => m.user.bot).size, 0),
     uptime: client.uptime,
     uptimeFormatted: ms(client.uptime || 0, { long: true }),
     lastRestart: new Date(Date.now() - (client.uptime || 0)).toISOString(),
     apiStatus: 'Online',
     gatewayStatus: gatewayStatusMap[client.ws.status] || 'Desconhecido',
-    dbStatus: dbHealthy ? 'Saudável' : 'Instável'
+    dbStatus: dbHealthy ? 'Saudável' : 'Instável',
+    serverInfo
   });
 });
 
