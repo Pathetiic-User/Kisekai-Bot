@@ -164,7 +164,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildPresences
   ]
 });
 
@@ -464,12 +465,22 @@ function createCustomEmbed(data, placeholders = {}) {
 client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
   
-  // Security: Leave unauthorized guilds
   const authorizedGuildId = "1438658038612623534";
-  client.guilds.cache.forEach(guild => {
-    if (guild.id !== authorizedGuildId) {
-      console.log(`Saindo de servidor não autorizado: ${guild.name} (${guild.id})`);
-      guild.leave();
+  const guild = client.guilds.cache.get(authorizedGuildId);
+  if (guild) {
+    try {
+      await guild.members.fetch();
+      console.log(`Membros carregados para a guilda: ${guild.name}`);
+    } catch (err) {
+      console.error(`Erro ao carregar membros da guilda ${guild.name}:`, err);
+    }
+  }
+
+  // Security: Leave unauthorized guilds
+  client.guilds.cache.forEach(g => {
+    if (g.id !== authorizedGuildId) {
+      console.log(`Saindo de servidor não autorizado: ${g.name} (${g.id})`);
+      g.leave();
     }
   });
 
@@ -1104,8 +1115,12 @@ app.get('/api/stats', async (req, res) => {
   res.json({
     servers: client.guilds.cache.size,
     users: client.guilds.cache.reduce((acc, guild) => {
-      const botCount = guild.members.cache.filter(m => m.user.bot).size;
-      return acc + (guild.memberCount - botCount);
+      const humans = guild.members.cache.filter(m => !m.user.bot).size;
+      return acc + humans;
+    }, 0),
+    onlineUsers: client.guilds.cache.reduce((acc, guild) => {
+      const onlineHumans = guild.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size;
+      return acc + onlineHumans;
     }, 0),
     botCount: client.guilds.cache.reduce((acc, guild) => acc + guild.members.cache.filter(m => m.user.bot).size, 0),
     uptime: client.uptime,
@@ -1143,13 +1158,14 @@ app.get('/api/users/search', async (req, res) => {
       return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
     }
 
-    const members = await guild.members.fetch({ query: q, limit: 20 });
+    const members = await guild.members.fetch({ query: q, limit: 20, withPresences: true });
     const results = members.map(m => ({
       id: m.user.id,
       username: m.user.username,
       globalName: m.user.globalName, // Nome da conta (Display Name global)
       displayName: m.displayName,     // Apelido no servidor
-      avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 })
+      avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 }),
+      status: m.presence?.status || 'offline'
     }));
 
     res.json(results);
@@ -1175,8 +1191,8 @@ app.get('/api/users', async (req, res) => {
       return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
     }
 
-    // Fetch all members with a timeout for safety
-    const members = await guild.members.fetch({ withPresences: false }).catch(err => {
+    // Fetch all members with presences
+    const members = await guild.members.fetch({ withPresences: true }).catch(err => {
       console.error('Error fetching members:', err);
       throw err;
     });
@@ -1188,8 +1204,9 @@ app.get('/api/users', async (req, res) => {
       displayName: m.displayName,
       avatar: m.user.avatar,
       avatarURL: m.user.displayAvatarURL({ size: 256 }),
+      status: m.presence?.status || 'offline',
       isBot: m.user.bot,
-      isApp: m.user.bot, // Categorizando como APP se for bot
+      isApp: m.user.bot,
       isOwner: m.id === guild.ownerId
     })).sort((a, b) => {
       if (a.isOwner) return -1;
@@ -1226,7 +1243,7 @@ app.post('/api/users/reload/:userId', async (req, res) => {
     const guild = client.guilds.cache.get(authorizedGuildId);
     if (!guild) return res.status(404).json({ error: 'Guild not found' });
 
-    const member = await guild.members.fetch(userId);
+    const member = await guild.members.fetch({ user: userId, withPresences: true });
     const userData = {
       id: member.user.id,
       username: member.user.username,
@@ -1234,6 +1251,7 @@ app.post('/api/users/reload/:userId', async (req, res) => {
       displayName: member.displayName,
       avatar: member.user.avatar,
       avatarURL: member.user.displayAvatarURL({ size: 256 }),
+      status: member.presence?.status || 'offline',
       isBot: member.user.bot,
       isApp: member.user.bot,
       isOwner: member.id === guild.ownerId
