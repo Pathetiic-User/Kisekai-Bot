@@ -1595,13 +1595,23 @@ app.get('/api/moderation/punishments', async (req, res) => {
 });
 
 app.get('/api/moderation/punished-users', async (req, res) => {
+  const { filter } = req.query; // ban, mute, kick, warn
   try {
-    const result = await pool.query(`
-      SELECT DISTINCT ON (user_id) user_id, timestamp
+    let query = `
+      SELECT user_id, MAX(timestamp) as last_punishment
       FROM logs
-      WHERE type = 'Administrativa'
-      ORDER BY user_id, timestamp DESC
-    `);
+      WHERE type = 'Administrativa' AND action != 'innocent'
+    `;
+    const params = [];
+
+    if (filter) {
+      query += ` AND action ILIKE $1`;
+      params.push(`${filter}%`);
+    }
+
+    query += ` GROUP BY user_id ORDER BY last_punishment DESC`;
+
+    const result = await pool.query(query, params);
 
     const users = await Promise.all(result.rows.map(async (row) => {
       try {
@@ -1609,13 +1619,15 @@ app.get('/api/moderation/punished-users', async (req, res) => {
         return {
           id: user.id,
           username: user.username,
-          avatarURL: user.displayAvatarURL()
+          avatarURL: user.displayAvatarURL(),
+          last_punishment: row.last_punishment
         };
       } catch (e) {
         return {
           id: row.user_id,
           username: 'Unknown',
-          avatarURL: null
+          avatarURL: null,
+          last_punishment: row.last_punishment
         };
       }
     }));
@@ -1695,8 +1707,64 @@ app.get('/api/moderation/history', async (req, res) => {
 app.get('/api/moderation/history/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const result = await pool.query("SELECT * FROM logs WHERE user_id = $1 ORDER BY timestamp DESC", [userId]);
-    res.json(result.rows);
+    const authorizedGuildId = "1438658038612623534";
+    const guild = client.guilds.cache.get(authorizedGuildId);
+    
+    const result = await pool.query(
+      "SELECT * FROM logs WHERE user_id = $1 AND type = 'Administrativa' AND action != 'innocent' ORDER BY timestamp DESC", 
+      [userId]
+    );
+    
+    let isBanned = false;
+    let isMuted = false;
+    let muteEndsAt = null;
+
+    if (guild) {
+      try {
+        const banInfo = await guild.bans.fetch(userId).catch(() => null);
+        isBanned = !!banInfo;
+
+        const member = await guild.members.fetch(userId).catch(() => null);
+        if (member && member.communicationDisabledUntil && member.communicationDisabledUntil > new Date()) {
+          isMuted = true;
+          muteEndsAt = member.communicationDisabledUntil;
+        }
+      } catch (e) {
+        console.error('Error fetching Discord status:', e);
+      }
+    }
+
+    const history = result.rows.map(row => {
+      let status = 'Expirado';
+      const action = row.action.toLowerCase();
+      
+      if (action === 'ban' && isBanned) {
+        status = 'Em Execução';
+      } else if (action === 'mute' && isMuted) {
+        status = 'Em Execução';
+      }
+
+      return {
+        ...row,
+        status
+      };
+    });
+
+    const summary = {
+      bans: history.filter(h => h.action.toLowerCase() === 'ban'),
+      mutes: history.filter(h => h.action.toLowerCase() === 'mute'),
+      kicks: history.filter(h => h.action.toLowerCase() === 'kick'),
+      warns: history.filter(h => h.action.toLowerCase().startsWith('warn'))
+    };
+
+    res.json({
+      userId,
+      isBanned,
+      isMuted,
+      muteEndsAt,
+      history,
+      summary
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
