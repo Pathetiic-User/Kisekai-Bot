@@ -469,8 +469,8 @@ client.on('ready', async () => {
   const guild = client.guilds.cache.get(authorizedGuildId);
   if (guild) {
     try {
-      await guild.members.fetch();
-      console.log(`Membros carregados para a guilda: ${guild.name}`);
+      await guild.members.fetch({ withPresences: true });
+      console.log(`Membros e presenças carregados para a guilda: ${guild.name}`);
     } catch (err) {
       console.error(`Erro ao carregar membros da guilda ${guild.name}:`, err);
     }
