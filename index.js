@@ -2017,6 +2017,51 @@ app.post('/api/moderate/:action', upload.single('evidence'), async (req, res) =>
   }
 });
 
+app.get('/api/messages/:channelId/:messageId', async (req, res) => {
+  const { channelId, messageId } = req.params;
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return res.status(404).json({ error: 'Canal não encontrado' });
+    if (!channel.isTextBased()) return res.status(400).json({ error: 'O canal deve ser de texto' });
+
+    const message = await channel.messages.fetch(messageId);
+    if (!message) return res.status(404).json({ error: 'Mensagem não encontrada' });
+
+    const payload = {
+      content: message.content,
+      embeds: message.embeds.map(embed => ({
+        title: embed.title,
+        description: embed.description,
+        url: embed.url,
+        color: embed.hexColor,
+        timestamp: embed.timestamp,
+        author: embed.author ? {
+          name: embed.author.name,
+          iconURL: embed.author.iconURL,
+          url: embed.author.url
+        } : null,
+        footer: embed.footer ? {
+          text: embed.footer.text,
+          iconURL: embed.footer.iconURL
+        } : null,
+        image: embed.image ? { url: embed.image.url } : null,
+        thumbnail: embed.thumbnail ? { url: embed.thumbnail.url } : null,
+        fields: embed.fields.map(f => ({
+          name: f.name,
+          value: f.value,
+          inline: f.inline
+        }))
+      }))
+    };
+
+    res.json(payload);
+  } catch (err) {
+    console.error('Error fetching message:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/broadcast', async (req, res) => {
   const { channelId, content, embeds } = req.body;
   if (!channelId) return res.status(400).json({ error: 'Missing channelId' });
