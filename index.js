@@ -369,9 +369,19 @@ async function ensureOfficialAutoRole(guild) {
       });
     }
 
-    if (role && config.autoRole !== role.id) {
-      config.autoRole = role.id;
-      await saveConfig();
+    if (role) {
+      // Garantir que esse cargo fique no próprio bot (cargo exclusivo do bot)
+      const botMember = await guild.members.fetch(client.user.id).catch(() => null);
+      if (botMember && !botMember.roles.cache.has(role.id)) {
+        await botMember.roles.add(role, 'Vincular cargo oficial exclusivo do bot');
+      }
+
+      // Mantém o autoRole apontando para o cargo oficial (legado), mas o evento de entrada
+      // abaixo impede atribuição para membros humanos quando esse for o cargo oficial.
+      if (config.autoRole !== role.id) {
+        config.autoRole = role.id;
+        await saveConfig();
+      }
     }
   } catch (err) {
     console.error('Erro ao garantir o cargo oficial do bot:', err);
@@ -565,9 +575,15 @@ client.on('guildCreate', async guild => {
 
 // Auto-role and Welcome on join
 client.on('guildMemberAdd', async member => {
+  // Nunca alterar cargos de bots (inclusive o próprio bot convidado com permissões de admin)
+  if (member.user.bot) return;
+
   if (config.autoRole) {
     const role = member.guild.roles.cache.get(config.autoRole);
     if (role) {
+      // Se o autoRole for o cargo oficial do bot, não atribuir para humanos
+      if (role.name === '✔️  Oficial Kisekai Bot') return;
+
       try {
         await member.roles.add(role);
         await logToChannel(member.guild, 'Auto-Role', `Added auto-role to ${member.user.tag}`);
