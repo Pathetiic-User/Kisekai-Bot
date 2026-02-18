@@ -81,7 +81,7 @@ const authMiddleware = async (req, res, next) => {
 
   const apiKey = req.headers['x-api-key'];
   const masterKey = process.env.API_KEY;
-  const token = req.cookies.token;
+  const token = getSessionTokenFromRequest(req);
   
   // 1. Verificar API Key (para chamadas externas/bot)
   if (apiKey && masterKey && apiKey === masterKey) {
@@ -220,6 +220,15 @@ let statsCache = {
   lastFetched: 0
 };
 const STATS_CACHE_TTL = 15 * 1000; // 15s
+
+function getSessionTokenFromRequest(req) {
+  const cookieToken = req.cookies?.token;
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : null;
+  const headerToken = req.headers['x-session-token'];
+
+  return cookieToken || bearerToken || headerToken || null;
+}
 
 function getCookieOptions(req, maxAge = 7 * 24 * 60 * 60 * 1000) {
   const requestHost = (req.get('host') || '').toLowerCase();
@@ -1006,7 +1015,9 @@ app.get('/api/auth/callback', async (req, res) => {
 
     // Redirect based on access
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
-    const redirectUrl = hasAccess ? `${frontendUrl}/` : `${frontendUrl}/suporte`;
+    const redirectUrl = hasAccess
+      ? `${frontendUrl}/?session=${encodeURIComponent(token)}`
+      : `${frontendUrl}/suporte?session=${encodeURIComponent(token)}`;
     res.redirect(redirectUrl);
 
   } catch (err) {
@@ -1016,7 +1027,7 @@ app.get('/api/auth/callback', async (req, res) => {
 });
 
 app.get('/api/auth/me', async (req, res) => {
-  const token = req.cookies.token;
+  const token = getSessionTokenFromRequest(req);
   if (!token) return res.status(401).json({ authenticated: false });
 
   try {
@@ -1060,7 +1071,7 @@ app.get('/api/auth/me', async (req, res) => {
 });
 
 app.post('/api/auth/logout', async (req, res) => {
-  const token = req.cookies.token;
+  const token = getSessionTokenFromRequest(req);
   if (token) {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
