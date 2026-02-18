@@ -213,6 +213,66 @@ let usersCache = {
   data: null,
   lastFetched: 0
 };
+const userProfileCache = new Map();
+const USER_PROFILE_CACHE_TTL = 5 * 60 * 1000; // 5 min
+let statsCache = {
+  data: null,
+  lastFetched: 0
+};
+const STATS_CACHE_TTL = 15 * 1000; // 15s
+
+function getCookieOptions(req, maxAge = 7 * 24 * 60 * 60 * 1000) {
+  const origin = req.headers.origin;
+  const requestHost = req.get('host');
+  let isCrossSite = false;
+
+  try {
+    if (origin && requestHost) {
+      const originHost = new URL(origin).host;
+      isCrossSite = originHost !== requestHost;
+    }
+  } catch (e) {
+    isCrossSite = false;
+  }
+
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+  return {
+    httpOnly: true,
+    secure: isCrossSite ? true : (process.env.NODE_ENV === 'production' || isHttps),
+    sameSite: isCrossSite ? 'none' : 'lax',
+    maxAge
+  };
+}
+
+function getClearCookieOptions(req) {
+  const options = getCookieOptions(req, 0);
+  return {
+    httpOnly: options.httpOnly,
+    secure: options.secure,
+    sameSite: options.sameSite,
+  };
+}
+
+async function getCachedDiscordUserSummary(userId) {
+  const cached = userProfileCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  const value = {
+    username: user ? user.username : 'Desconhecido',
+    avatarURL: user ? user.displayAvatarURL() : null,
+  };
+
+  userProfileCache.set(userId, {
+    value,
+    expiresAt: Date.now() + USER_PROFILE_CACHE_TTL,
+  });
+
+  return value;
+}
 
 // Database Initialization
 async function initDb() {
@@ -918,12 +978,7 @@ app.get('/api/auth/callback', async (req, res) => {
       role
     }, JWT_SECRET, { expiresIn: '7d' });
 
-    res.cookie('token', token, { 
-      httpOnly: true, 
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000 
-    });
+    res.cookie('token', token, getCookieOptions(req));
 
     // Redirect based on access
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
@@ -964,12 +1019,7 @@ app.get('/api/auth/me', async (req, res) => {
         role
       }, JWT_SECRET, { expiresIn: '7d' });
 
-      res.cookie('token', refreshedToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000
-      });
+      res.cookie('token', refreshedToken, getCookieOptions(req));
     }
 
     res.json({ 
@@ -993,7 +1043,7 @@ app.post('/api/auth/logout', async (req, res) => {
       await addLog(decoded.id, 'Logout Dashboard', `Usuário saiu do dashboard`, 'System', 'System').catch(console.error);
     } catch (e) {}
   }
-  res.clearCookie('token');
+  res.clearCookie('token', getClearCookieOptions(req));
   res.json({ success: true });
 });
 
@@ -1177,15 +1227,14 @@ app.get('/api/logs', async (req, res) => {
     const result = await pool.query(query, params);
 
     const logs = await Promise.all(result.rows.map(async (log) => {
-      const user = await client.users.fetch(log.user_id).catch(() => null);
-      const avatarUrl = user ? user.displayAvatarURL() : null;
+      const userSummary = await getCachedDiscordUserSummary(log.user_id);
       return {
         id: log.id,
         action: log.action,
         userId: log.user_id,
-        username: user ? user.username : 'Desconhecido',
-        avatar: avatarUrl,
-        avatarURL: avatarUrl,
+        username: userSummary.username,
+        avatar: userSummary.avatarURL,
+        avatarURL: userSummary.avatarURL,
         moderator: log.moderator,
         reason: log.reason,
         timestamp: log.timestamp,
@@ -1205,6 +1254,10 @@ app.get('/api/logs', async (req, res) => {
 });
 
 app.get('/api/stats', async (req, res) => {
+  if (statsCache.data && (Date.now() - statsCache.lastFetched < STATS_CACHE_TTL)) {
+    return res.json(statsCache.data);
+  }
+
   let dbHealthy = false;
   try {
     const dbCheck = await pool.query('SELECT 1');
@@ -1261,7 +1314,7 @@ app.get('/api/stats', async (req, res) => {
     channelCount: guild.channels.cache.size
   } : null;
 
-  res.json({
+  const statsPayload = {
     servers: client.guilds.cache.size,
     users: humanMembers.size,
     onlineUsers: onlineHumans,
@@ -1273,7 +1326,14 @@ app.get('/api/stats', async (req, res) => {
     gatewayStatus: gatewayStatusMap[client.ws.status] || 'Desconhecido',
     dbStatus: dbHealthy ? 'Saudável' : 'Instável',
     serverInfo
-  });
+  };
+
+  statsCache = {
+    data: statsPayload,
+    lastFetched: Date.now()
+  };
+
+  res.json(statsPayload);
 });
 
 app.get('/api/users/:id', async (req, res) => {
