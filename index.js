@@ -356,38 +356,6 @@ async function saveConfig() {
   await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
 }
 
-async function ensureOfficialAutoRole(guild) {
-  const officialRoleName = '✔️  Oficial Kisekai Bot';
-
-  try {
-    let role = guild.roles.cache.find(r => r.name === officialRoleName);
-
-    if (!role) {
-      role = await guild.roles.create({
-        name: officialRoleName,
-        reason: 'Criação automática do cargo oficial do bot'
-      });
-    }
-
-    if (role) {
-      // Garantir que esse cargo fique no próprio bot (cargo exclusivo do bot)
-      const botMember = await guild.members.fetch(client.user.id).catch(() => null);
-      if (botMember && !botMember.roles.cache.has(role.id)) {
-        await botMember.roles.add(role, 'Vincular cargo oficial exclusivo do bot');
-      }
-
-      // Mantém o autoRole apontando para o cargo oficial (legado), mas o evento de entrada
-      // abaixo impede atribuição para membros humanos quando esse for o cargo oficial.
-      if (config.autoRole !== role.id) {
-        config.autoRole = role.id;
-        await saveConfig();
-      }
-    }
-  } catch (err) {
-    console.error('Erro ao garantir o cargo oficial do bot:', err);
-  }
-}
-
 async function addLog(userId, action, reason, moderator, type = 'Administrativa', duration = null) {
   try {
     await pool.query(
@@ -508,8 +476,6 @@ client.on('ready', async () => {
   const authorizedGuildId = "1438658038612623534";
   const guild = client.guilds.cache.get(authorizedGuildId);
   if (guild) {
-    await ensureOfficialAutoRole(guild);
-
     try {
       await guild.members.fetch({ withPresences: true });
       console.log(`Membros e presenças carregados para a guilda: ${guild.name}`);
@@ -569,8 +535,6 @@ client.on('guildCreate', async guild => {
     guild.leave();
     return;
   }
-
-  await ensureOfficialAutoRole(guild);
 });
 
 // Auto-role and Welcome on join
@@ -581,9 +545,6 @@ client.on('guildMemberAdd', async member => {
   if (config.autoRole) {
     const role = member.guild.roles.cache.get(config.autoRole);
     if (role) {
-      // Se o autoRole for o cargo oficial do bot, não atribuir para humanos
-      if (role.name === '✔️  Oficial Kisekai Bot') return;
-
       try {
         await member.roles.add(role);
         await logToChannel(member.guild, 'Auto-Role', `Added auto-role to ${member.user.tag}`);
