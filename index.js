@@ -71,8 +71,8 @@ app.use('/api/', limiter);
 
 // Middleware de Autenticação da API
 const authMiddleware = async (req, res, next) => {
-  // Excluir rotas de autenticação da verificação
-  if (req.path.startsWith('/auth/')) return next();
+  // Excluir apenas rotas de login da verificação
+  if (req.path.startsWith('/auth/login') || req.path.startsWith('/auth/callback')) return next();
 
   const apiKey = req.headers['x-api-key'];
   const masterKey = process.env.API_KEY;
@@ -929,8 +929,8 @@ app.get('/api/access', async (req, res) => {
 });
 
 app.post('/api/access/grant', async (req, res) => {
-  if (req.user?.role !== 'owner') {
-    return res.status(403).json({ error: 'Apenas o dono do servidor pode conceder acesso.' });
+  if (req.user?.role !== 'owner' && req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor ou administradores podem conceder acesso.' });
   }
 
   const { userId } = req.body;
@@ -960,8 +960,8 @@ app.post('/api/access/grant', async (req, res) => {
 });
 
 app.post('/api/access/revoke', async (req, res) => {
-  if (req.user?.role !== 'owner') {
-    return res.status(403).json({ error: 'Apenas o dono do servidor pode revogar acesso.' });
+  if (req.user?.role !== 'owner' && req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor ou administradores podem revogar acesso.' });
   }
 
   const { userId } = req.body;
@@ -2063,14 +2063,18 @@ app.get('/api/messages/:channelId/:messageId', async (req, res) => {
 });
 
 app.post('/api/broadcast', async (req, res) => {
-  const { channelId, content, embeds } = req.body;
+  const { channelId, content, embeds, components } = req.body;
   if (!channelId) return res.status(400).json({ error: 'Missing channelId' });
 
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return res.status(404).json({ error: 'Channel not found' });
 
-    const payload = { content, embeds: embeds?.map(e => createCustomEmbed(e)) };
+    const payload = { 
+      content, 
+      embeds: embeds?.map(e => createCustomEmbed(e)),
+      components: components
+    };
     await channel.send(payload);
     res.json({ success: true });
   } catch (err) {
