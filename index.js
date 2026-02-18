@@ -222,14 +222,38 @@ let statsCache = {
 const STATS_CACHE_TTL = 15 * 1000; // 15s
 
 function getCookieOptions(req, maxAge = 7 * 24 * 60 * 60 * 1000) {
+  const requestHost = (req.get('host') || '').toLowerCase();
+
+  // Regra robusta:
+  // - Backend local (localhost/127.0.0.1): usa Lax para funcionar sem HTTPS local
+  // - Backend remoto (ex: Railway): força None+Secure para permitir cookies cross-site no dashboard
+  const isLocalBackend = requestHost.includes('localhost') || requestHost.includes('127.0.0.1');
+
+  if (!isLocalBackend) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge
+    };
+  }
+
   const origin = req.headers.origin;
-  const requestHost = req.get('host');
+  const referer = req.headers.referer;
+  const frontendUrl = process.env.FRONTEND_URL || process.env.DASHBOARD_URL;
   let isCrossSite = false;
 
   try {
     if (origin && requestHost) {
       const originHost = new URL(origin).host;
       isCrossSite = originHost !== requestHost;
+    } else if (referer && requestHost) {
+      const refererHost = new URL(referer).host;
+      isCrossSite = refererHost !== requestHost;
+    } else if (frontendUrl && requestHost) {
+      // Importante para OAuth callback: normalmente não há Origin no redirect final.
+      const frontendHost = new URL(frontendUrl).host;
+      isCrossSite = frontendHost !== requestHost;
     }
   } catch (e) {
     isCrossSite = false;
