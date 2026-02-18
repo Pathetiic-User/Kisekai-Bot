@@ -98,9 +98,21 @@ const authMiddleware = async (req, res, next) => {
         if (decoded.id === guild.ownerId) {
           hasRealTimeAccess = true;
         } else {
+          // 1. Verificar cargo no Discord
           const member = await guild.members.fetch(decoded.id).catch(() => null);
           if (member && member.roles.cache.has(dashboardRoleID)) {
             hasRealTimeAccess = true;
+          }
+          // 2. Fallback: verificar tabela dashboard_access no banco
+          if (!hasRealTimeAccess) {
+            const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [decoded.id]).catch(() => null);
+            if (dbCheck && dbCheck.rows.length > 0) {
+              hasRealTimeAccess = true;
+              // Tentar re-adicionar o cargo se o membro estiver no servidor
+              if (member) {
+                member.roles.add(dashboardRoleID).catch(() => null);
+              }
+            }
           }
         }
       }
@@ -823,9 +835,22 @@ app.get('/api/auth/callback', async (req, res) => {
         role = 'owner';
       } else {
         const member = await guild.members.fetch(userData.id).catch(() => null);
+        // 1. Verificar cargo no Discord
         if (member && member.roles.cache.has(dashboardRoleID)) {
           hasAccess = true;
-          role = 'admin'; // Or check DB if specific admin/moderator roles are still needed
+          role = 'admin';
+        }
+        // 2. Fallback: verificar tabela dashboard_access no banco
+        if (!hasAccess) {
+          const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [userData.id]).catch(() => null);
+          if (dbCheck && dbCheck.rows.length > 0) {
+            hasAccess = true;
+            role = 'admin';
+            // Tentar re-adicionar o cargo se o membro estiver no servidor
+            if (member) {
+              member.roles.add(dashboardRoleID).catch(() => null);
+            }
+          }
         }
       }
     }
@@ -851,7 +876,7 @@ app.get('/api/auth/callback', async (req, res) => {
 
     // Redirect based on access
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
-    const redirectUrl = hasAccess ? `${frontendUrl}/` : `${frontendUrl}/support`;
+    const redirectUrl = hasAccess ? `${frontendUrl}/` : `${frontendUrl}/suporte`;
     res.redirect(redirectUrl);
 
   } catch (err) {
@@ -929,8 +954,9 @@ app.get('/api/access', async (req, res) => {
 });
 
 app.post('/api/access/grant', async (req, res) => {
-  if (req.user?.role !== 'owner' && req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Apenas o dono do servidor ou administradores podem conceder acesso.' });
+  // Somente o dono do servidor pode conceder acesso
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode conceder acesso ao dashboard.' });
   }
 
   const { userId } = req.body;
@@ -942,26 +968,38 @@ app.post('/api/access/grant', async (req, res) => {
       [userId, true]
     );
 
-    // Give Discord Role
+    // Give Discord Role - forçar fetch para garantir que o membro está atualizado
     const authorizedGuildId = "1438658038612623534";
-    const dashboardRoleID = "1464264578773811301";
+    const dashboardRoleID = config.adminRole || "1464264578773811301";
     const guild = client.guilds.cache.get(authorizedGuildId);
+    let roleAdded = false;
     if (guild) {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (member) {
-        await member.roles.add(dashboardRoleID).catch(console.error);
+      try {
+        const member = await guild.members.fetch({ user: userId, force: true });
+        if (member) {
+          await member.roles.add(dashboardRoleID);
+          roleAdded = true;
+        }
+      } catch (roleErr) {
+        console.error(`Erro ao adicionar cargo para ${userId}:`, roleErr.message);
       }
     }
 
-    res.json({ success: true, message: 'Acesso concedido e cargo atribuído.' });
+    res.json({ 
+      success: true, 
+      message: roleAdded 
+        ? 'Acesso concedido e cargo atribuído com sucesso.' 
+        : 'Acesso concedido no banco, mas o cargo não pôde ser atribuído (usuário pode não estar no servidor).'
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/access/revoke', async (req, res) => {
-  if (req.user?.role !== 'owner' && req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Apenas o dono do servidor ou administradores podem revogar acesso.' });
+  // Somente o dono do servidor pode revogar acesso
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode revogar acesso ao dashboard.' });
   }
 
   const { userId } = req.body;
@@ -970,14 +1008,18 @@ app.post('/api/access/revoke', async (req, res) => {
   try {
     await pool.query('DELETE FROM dashboard_access WHERE user_id = $1', [userId]);
 
-    // Remove Discord Role
+    // Remove Discord Role - forçar fetch para garantir que o membro está atualizado
     const authorizedGuildId = "1438658038612623534";
-    const dashboardRoleID = "1464264578773811301";
+    const dashboardRoleID = config.adminRole || "1464264578773811301";
     const guild = client.guilds.cache.get(authorizedGuildId);
     if (guild) {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (member) {
-        await member.roles.remove(dashboardRoleID).catch(console.error);
+      try {
+        const member = await guild.members.fetch({ user: userId, force: true });
+        if (member) {
+          await member.roles.remove(dashboardRoleID);
+        }
+      } catch (roleErr) {
+        console.error(`Erro ao remover cargo de ${userId}:`, roleErr.message);
       }
     }
 
