@@ -327,7 +327,12 @@ async function initDb() {
       CREATE TABLE IF NOT EXISTS templates (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
-        data JSONB NOT NULL
+        data JSONB NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        hidden_for TEXT[] DEFAULT '{}',
+        deletion_requested_by TEXT[] DEFAULT '{}'
       );
       CREATE TABLE IF NOT EXISTS reports (
         id SERIAL PRIMARY KEY,
@@ -391,6 +396,23 @@ async function initDb() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='duration') THEN
           ALTER TABLE logs ADD COLUMN duration TEXT;
         END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='templates' AND column_name='created_by') THEN
+          ALTER TABLE templates ADD COLUMN created_by TEXT;
+          UPDATE templates SET created_by = 'legacy' WHERE created_by IS NULL;
+          ALTER TABLE templates ALTER COLUMN created_by SET NOT NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='templates' AND column_name='created_by_username') THEN
+          ALTER TABLE templates ADD COLUMN created_by_username TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='templates' AND column_name='created_at') THEN
+          ALTER TABLE templates ADD COLUMN created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+          UPDATE templates SET created_at = NOW() WHERE created_at IS NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='templates' AND column_name='updated_at') THEN
+          ALTER TABLE templates ADD COLUMN updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+          UPDATE templates SET updated_at = NOW() WHERE updated_at IS NULL;
+        END IF;
       END $$;
     `);
 
@@ -433,25 +455,11 @@ async function initDb() {
     // Limpeza periódica de reportes
     const cleanupReports = async () => {
       try {
-        // 1. Mover reportes reprovados para a lixeira após 7 dias
+        // 1. Mover reportes para a lixeira após 7 dias
         await pool.query(
-          "UPDATE reports SET status = 'deleted', deleted_at = NOW() WHERE status = 'rejected' AND rejected_at < NOW() - INTERVAL '7 days'"
+          "UPDATE reports SET status = 'deleted', deleted_at = NOW() WHERE status != 'deleted' AND timestamp < NOW() - INTERVAL '7 days'"
         );
-
-        // 2. Limpeza permanente (30 dias na lixeira)
-        const { rows: reportsToDelete } = await pool.query(
-          "SELECT image_url FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'"
-        );
-
-        for (const report of reportsToDelete) {
-          if (report.image_url && report.image_url.includes('storage/v1/object/public/reports/')) {
-            const fileName = report.image_url.split('/').pop();
-            await supabase.storage.from('reports').remove([fileName]);
-          }
-        }
-
-        await pool.query("DELETE FROM reports WHERE status = 'deleted' AND deleted_at < NOW() - INTERVAL '30 days'");
-        console.log('Limpeza de reportes concluída.');
+        console.log('Limpeza automática concluída: reportes antigos enviados para a lixeira.');
       } catch (err) {
         console.error('Erro na limpeza de reportes:', err);
       }
@@ -1747,6 +1755,10 @@ app.patch('/api/reports/:id/status', async (req, res) => {
 });
 
 app.delete('/api/reports/:id', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode enviar para lixeira ou excluir reportes.' });
+  }
+
   const { id } = req.params;
   const { permanent } = req.query;
 
@@ -1786,6 +1798,10 @@ app.delete('/api/reports/:id', async (req, res) => {
 });
 
 app.post('/api/reports/bulk-delete', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode enviar para lixeira ou excluir reportes.' });
+  }
+
   const { ids } = req.body;
   if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'IDs inválidos' });
 
@@ -1828,6 +1844,10 @@ app.post('/api/reports/bulk-delete', async (req, res) => {
 });
 
 app.delete('/api/reports/trash/clear', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono do servidor pode limpar a lixeira.' });
+  }
+
   try {
     const { rows: reportsToDelete } = await pool.query("SELECT image_url FROM reports WHERE status = 'deleted'");
     
@@ -2347,10 +2367,119 @@ app.post('/api/broadcast', async (req, res) => {
   }
 });
 
+// Helper: Get user display info from Discord (cached)
+async function getUserInfo(userId) {
+  const cached = userProfileCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  const value = {
+    username: user ? user.username : 'Desconhecido',
+    avatarURL: user ? user.displayAvatarURL() : null,
+  };
+
+  userProfileCache.set(userId, {
+    value,
+    expiresAt: Date.now() + USER_PROFILE_CACHE_TTL,
+  });
+
+  return value;
+}
+
+// Helper: Check permissions for template actions
+async function checkTemplatePermissions(userId, templateId) {
+  const authorizedGuildId = "1438658038612623534";
+  const guild = client.guilds.cache.get(authorizedGuildId);
+  const dashboardRoleID = config.adminRole || "1464264578773811301";
+
+  let isOwner = false;
+  let isAdminCreator = false;
+  let isCreator = false;
+
+  if (guild) {
+    if (userId === guild.ownerId) {
+      isOwner = true;
+    } else {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member && member.roles.cache.has(dashboardRoleID)) {
+        isAdminCreator = true;
+      }
+    }
+  }
+
+  // Check creator in DB
+  const creatorResult = await pool.query('SELECT created_by FROM templates WHERE id = $1', [templateId]);
+  if (creatorResult.rows.length > 0) {
+    isCreator = creatorResult.rows[0].created_by === userId;
+  }
+
+  return { isOwner, isAdminCreator, isCreator };
+}
+
+// Helper: Get user role for UI indicators
+async function getUserRole(userId) {
+  const authorizedGuildId = "1438658038612623534";
+  const guild = client.guilds.cache.get(authorizedGuildId);
+  const dashboardRoleID = config.adminRole || "1464264578773811301";
+
+  if (guild) {
+    if (userId === guild.ownerId) return 'owner';
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member && member.roles.cache.has(dashboardRoleID)) return 'admin';
+  }
+  return 'user';
+}
+
+// Templates API with permissions
 app.get('/api/templates', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM templates ORDER BY id DESC');
-    res.json(result.rows);
+    const { page = 1, limit = 10, search, date, byMe } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const params = [];
+    const conditions = [];
+
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(`name ILIKE $${params.length}`);
+    }
+    if (date) {
+      params.push(date);
+      conditions.push(`DATE(created_at) = $${params.length}`);
+    }
+    if (byMe === 'true') {
+      params.push(req.user?.id);
+      conditions.push(`created_by = $${params.length}`);
+    }
+
+    const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
+    const countQuery = `SELECT COUNT(*) FROM templates${whereClause}`;
+    const dataQuery = `SELECT * FROM templates${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+    params.push(parseInt(limit));
+    params.push(offset);
+
+    const [countResult, dataResult] = await Promise.all([
+      pool.query(countQuery, params.slice(0, -2)),
+      pool.query(dataQuery, params)
+    ]);
+
+    const templates = await Promise.all(dataResult.rows.map(async (t) => {
+      const creatorInfo = await getUserInfo(t.created_by);
+      const role = await getUserRole(t.created_by);
+      return {
+        ...t,
+        creatorInfo,
+        role
+      };
+    }));
+
+    res.json({
+      templates,
+      total: parseInt(countResult.rows[0].count),
+      hasMore: offset + templates.length < parseInt(countResult.rows[0].count)
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2359,17 +2488,108 @@ app.get('/api/templates', async (req, res) => {
 app.post('/api/templates', async (req, res) => {
   try {
     const { name, data } = req.body;
-    const result = await pool.query('INSERT INTO templates (name, data) VALUES ($1, $2) RETURNING *', [name, data]);
-    res.json(result.rows[0]);
+    const userId = req.user?.id || 'unknown';
+    
+    const result = await pool.query(
+      'INSERT INTO templates (name, data, created_by) VALUES ($1, $2, $3) RETURNING *',
+      [name, data, userId]
+    );
+    
+    const template = result.rows[0];
+    const creatorInfo = await getUserInfo(template.created_by);
+    const role = await getUserRole(template.created_by);
+
+    res.json({ ...template, creatorInfo, role });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.delete('/api/templates/:id', async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user?.id;
+
+  try {
+    const { isOwner, isAdminCreator, isCreator } = await checkTemplatePermissions(userId, id);
+
+    if (!isOwner && !isAdminCreator && !isCreator) {
+      return res.status(403).json({ error: 'Permissão negada: Você não pode excluir este template.' });
+    }
+
+    if (isOwner) {
+      // Dono pode excluir qualquer template
+      await pool.query('DELETE FROM templates WHERE id = $1', [id]);
+      return res.json({ success: true, message: 'Template excluído permanentemente.' });
+    }
+
+    if (isAdminCreator) {
+      // Admin não criador pode solicitar exclusão
+      await pool.query(
+        'UPDATE templates SET deletion_requested_by = array_append(deletion_requested_by, $1) WHERE id = $2',
+        [userId, id]
+      );
+      return res.json({ success: true, message: 'Solicitação de exclusão enviada ao dono.' });
+    }
+
+    if (isCreator) {
+      // Criador pode excluir seu próprio template
+      await pool.query('DELETE FROM templates WHERE id = $1', [id]);
+      return res.json({ success: true, message: 'Template excluído.' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// New: Get deletion requests (Owner only)
+app.get('/api/templates/deletion-requests', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode ver solicitações de exclusão.' });
+  }
+
+  try {
+    const result = await pool.query(`
+      SELECT t.*, array_length(deletion_requested_by, 1) as request_count
+      FROM templates t
+      WHERE array_length(deletion_requested_by, 1) > 0
+      ORDER BY created_at DESC
+    `);
+
+    const templates = await Promise.all(result.rows.map(async (t) => {
+      const creatorInfo = await getUserInfo(t.created_by);
+      const requesters = await Promise.all((t.deletion_requested_by || []).map(getUserInfo));
+      return { ...t, creatorInfo, requesters };
+    }));
+
+    res.json(templates);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// New: Confirm deletion request (Owner only)
+app.post('/api/templates/:id/confirm-delete', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode confirmar exclusões.' });
+  }
+
   try {
     await pool.query('DELETE FROM templates WHERE id = $1', [req.params.id]);
-    res.json({ success: true });
+    res.json({ success: true, message: 'Template excluído permanentemente.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// New: Reject deletion request (Owner only)
+app.post('/api/templates/:id/reject-delete', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode rejeitar solicitações.' });
+  }
+
+  try {
+    await pool.query('UPDATE templates SET deletion_requested_by = ARRAY[]::TEXT[] WHERE id = $1', [req.params.id]);
+    res.json({ success: true, message: 'Solicitação rejeitada.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
