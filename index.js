@@ -823,6 +823,57 @@ const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI;
 const JWT_SECRET = process.env.JWT_SECRET || 'kisekai-secret-key';
 
+async function getLiveDashboardAccess(userId) {
+  const authorizedGuildId = "1438658038612623534";
+  const dashboardRoleID = config.adminRole || "1464264578773811301";
+  const guild = client.guilds.cache.get(authorizedGuildId);
+
+  let hasAccess = false;
+  let role = 'user';
+
+  if (guild) {
+    if (userId === guild.ownerId) {
+      hasAccess = true;
+      role = 'owner';
+    } else {
+      const member = await guild.members.fetch(userId).catch(() => null);
+
+      // 1. Verificar cargo no Discord
+      if (member && member.roles.cache.has(dashboardRoleID)) {
+        hasAccess = true;
+        role = 'admin';
+      }
+
+      // 2. Fallback: verificar tabela dashboard_access no banco
+      if (!hasAccess) {
+        const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [userId]).catch(() => null);
+        if (dbCheck && dbCheck.rows.length > 0) {
+          hasAccess = true;
+          role = 'admin';
+
+          // Tentar re-adicionar o cargo se o membro estiver no servidor
+          if (member) {
+            member.roles.add(dashboardRoleID).catch(() => null);
+          }
+        }
+      }
+    }
+  } else {
+    // Bot pode estar reiniciando/reconectando: manter fallback por banco.
+    const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [userId]).catch(() => null);
+    if (dbCheck && dbCheck.rows.length > 0) {
+      hasAccess = true;
+      role = 'admin';
+    }
+  }
+
+  return {
+    hasAccess,
+    role,
+    guildAvailable: !!guild
+  };
+}
+
 app.get('/api/auth/login', (req, res) => {
   const url = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20guilds`;
   res.redirect(url);
@@ -852,38 +903,8 @@ app.get('/api/auth/callback', async (req, res) => {
 
     const userData = userResponse.data;
     
-    // Check access
-    const authorizedGuildId = "1438658038612623534";
-    const dashboardRoleID = "1464264578773811301";
-    const guild = client.guilds.cache.get(authorizedGuildId);
-    let hasAccess = false;
-    let role = 'user';
-
-    if (guild) {
-      if (userData.id === guild.ownerId) {
-        hasAccess = true;
-        role = 'owner';
-      } else {
-        const member = await guild.members.fetch(userData.id).catch(() => null);
-        // 1. Verificar cargo no Discord
-        if (member && member.roles.cache.has(dashboardRoleID)) {
-          hasAccess = true;
-          role = 'admin';
-        }
-        // 2. Fallback: verificar tabela dashboard_access no banco
-        if (!hasAccess) {
-          const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [userData.id]).catch(() => null);
-          if (dbCheck && dbCheck.rows.length > 0) {
-            hasAccess = true;
-            role = 'admin';
-            // Tentar re-adicionar o cargo se o membro estiver no servidor
-            if (member) {
-              member.roles.add(dashboardRoleID).catch(() => null);
-            }
-          }
-        }
-      }
-    }
+    // Check access (tempo real)
+    const { hasAccess, role } = await getLiveDashboardAccess(userData.id);
 
     if (hasAccess) {
       await addLog(userData.id, 'Login Dashboard', `Admin logou no dashboard`, 'System', 'System').catch(console.error);
@@ -915,19 +936,49 @@ app.get('/api/auth/callback', async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', (req, res) => {
+app.get('/api/auth/me', async (req, res) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ authenticated: false });
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    const liveAccess = await getLiveDashboardAccess(decoded.id);
+
+    let hasAccess = liveAccess.hasAccess;
+    let role = liveAccess.role;
+
+    // Se Discord ainda não estiver disponível, evita falso negativo temporário
+    // usando o estado já conhecido no token.
+    if (!liveAccess.guildAvailable && !liveAccess.hasAccess) {
+      hasAccess = Boolean(decoded.hasAccess);
+      role = decoded.role || 'user';
+    }
+
+    // Atualizar token quando o acesso mudar (ex: recebeu cargo após login)
+    if (hasAccess !== Boolean(decoded.hasAccess) || role !== (decoded.role || 'user')) {
+      const refreshedToken = jwt.sign({
+        id: decoded.id,
+        username: decoded.username,
+        avatar: decoded.avatar,
+        hasAccess,
+        role
+      }, JWT_SECRET, { expiresIn: '7d' });
+
+      res.cookie('token', refreshedToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 7 * 24 * 60 * 60 * 1000
+      });
+    }
+
     res.json({ 
       authenticated: true, 
       id: decoded.id,
       username: decoded.username,
       avatar: decoded.avatar,
-      hasAccess: decoded.hasAccess,
-      role: decoded.role
+      hasAccess,
+      role
     });
   } catch (err) {
     res.status(401).json({ authenticated: false });
