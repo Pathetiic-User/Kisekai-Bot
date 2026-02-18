@@ -72,7 +72,12 @@ app.use('/api/', limiter);
 // Middleware de Autenticação da API
 const authMiddleware = async (req, res, next) => {
   // Excluir apenas rotas de login da verificação
-  if (req.path.startsWith('/auth/login') || req.path.startsWith('/auth/callback')) return next();
+  if (
+    req.path.startsWith('/auth/login') ||
+    req.path.startsWith('/auth/callback') ||
+    req.path.startsWith('/auth/me') ||
+    req.path.startsWith('/auth/logout')
+  ) return next();
 
   const apiKey = req.headers['x-api-key'];
   const masterKey = process.env.API_KEY;
@@ -94,7 +99,12 @@ const authMiddleware = async (req, res, next) => {
       const guild = client.guilds.cache.get(authorizedGuildId);
       
       let hasRealTimeAccess = false;
-      if (guild) {
+      let discordAccessCheckUnavailable = false;
+
+      if (!guild) {
+        // O bot pode estar iniciando/reconectando: evita falso negativo temporário.
+        discordAccessCheckUnavailable = true;
+      } else {
         if (decoded.id === guild.ownerId) {
           hasRealTimeAccess = true;
         } else {
@@ -117,10 +127,26 @@ const authMiddleware = async (req, res, next) => {
         }
       }
 
+      // Fallback extra: validação por banco mesmo sem guild em cache.
+      if (!hasRealTimeAccess) {
+        const dbCheck = await pool.query('SELECT user_id FROM dashboard_access WHERE user_id = $1', [decoded.id]).catch(() => null);
+        if (dbCheck && dbCheck.rows.length > 0) {
+          hasRealTimeAccess = true;
+        }
+      }
+
       if (hasRealTimeAccess) {
         req.user = decoded;
         return next();
       }
+
+      // Se a checagem do Discord estiver indisponível (startup/reconnect),
+      // não bloquear temporariamente usuários já autenticados no JWT.
+      if (discordAccessCheckUnavailable && decoded.hasAccess) {
+        req.user = decoded;
+        return next();
+      }
+
       return res.status(403).json({ error: 'Acesso negado: Você não tem o cargo necessário para acessar o dashboard.' });
     } catch (err) {
       // Token inválido, continua para erro 401
@@ -1257,10 +1283,26 @@ app.get('/api/users', async (req, res) => {
     }
 
     // Fetch all members with presences
-    const members = await guild.members.fetch({ withPresences: true }).catch(err => {
-      console.error('Error fetching members:', err);
-      throw err;
-    });
+    let members;
+    let lastFetchError = null;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        members = await guild.members.fetch({ withPresences: true });
+        lastFetchError = null;
+        break;
+      } catch (err) {
+        lastFetchError = err;
+        console.error(`Error fetching members (attempt ${attempt}/3):`, err?.message || err);
+        if (attempt < 3) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+      }
+    }
+
+    if (!members) {
+      throw lastFetchError || new Error('Falha ao carregar membros do Discord.');
+    }
 
     const results = members.map(m => ({
       id: m.user.id,
@@ -1297,7 +1339,7 @@ app.get('/api/users', async (req, res) => {
       return res.json(usersCache.data);
     }
 
-    res.status(500).json({ error: 'Erro ao listar usuários.' });
+    res.status(503).json({ error: 'Discord indisponível no momento. Tente novamente em instantes.' });
   }
 });
 
