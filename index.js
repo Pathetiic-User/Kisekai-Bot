@@ -1178,12 +1178,14 @@ app.get('/api/logs', async (req, res) => {
 
     const logs = await Promise.all(result.rows.map(async (log) => {
       const user = await client.users.fetch(log.user_id).catch(() => null);
+      const avatarUrl = user ? user.displayAvatarURL() : null;
       return {
         id: log.id,
         action: log.action,
         userId: log.user_id,
         username: user ? user.username : 'Desconhecido',
-        avatarURL: user ? user.displayAvatarURL() : null,
+        avatar: avatarUrl,
+        avatarURL: avatarUrl,
         moderator: log.moderator,
         reason: log.reason,
         timestamp: log.timestamp,
