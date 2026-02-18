@@ -2070,10 +2070,39 @@ app.post('/api/broadcast', async (req, res) => {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return res.status(404).json({ error: 'Channel not found' });
 
+    // Converte components do JSON do Discord para objetos Discord.js
+    const buildComponents = (rawComponents) => {
+      if (!rawComponents || !Array.isArray(rawComponents)) return [];
+      return rawComponents.map(row => {
+        if (row.type !== 1) return null; // Apenas ActionRow (type 1)
+        const actionRow = new ActionRowBuilder();
+        const builtComponents = (row.components || []).map(comp => {
+          if (comp.type === 2) { // Button
+            const btn = new ButtonBuilder();
+            if (comp.style) btn.setStyle(comp.style);
+            if (comp.label) btn.setLabel(comp.label);
+            if (comp.emoji) btn.setEmoji(comp.emoji);
+            if (comp.disabled !== undefined) btn.setDisabled(comp.disabled);
+            // Botão de link (style 5) usa URL, outros usam custom_id
+            if (comp.style === 5 || comp.style === ButtonStyle.Link) {
+              if (comp.url) btn.setURL(comp.url);
+            } else {
+              if (comp.custom_id) btn.setCustomId(comp.custom_id);
+            }
+            return btn;
+          }
+          return null;
+        }).filter(Boolean);
+        if (builtComponents.length === 0) return null;
+        actionRow.addComponents(builtComponents);
+        return actionRow;
+      }).filter(Boolean);
+    };
+
     const payload = { 
       content, 
       embeds: embeds?.map(e => createCustomEmbed(e)),
-      components: components
+      components: buildComponents(components)
     };
     await channel.send(payload);
     res.json({ success: true });
