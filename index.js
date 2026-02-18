@@ -356,6 +356,34 @@ async function saveConfig() {
   await pool.query('UPDATE configs SET data = $1 WHERE id = (SELECT id FROM configs LIMIT 1)', [config]);
 }
 
+async function ensureOfficialAutoRole(guild) {
+  const officialRoleName = '✔️  Oficial Kisekai Bot';
+
+  try {
+    let role = guild.roles.cache.find(r => r.name === officialRoleName);
+
+    if (!role) {
+      const oldRole = guild.roles.cache.find(r => r.name === 'Kisekai');
+
+      if (oldRole) {
+        role = await oldRole.setName(officialRoleName, 'Padronização do cargo oficial do bot');
+      } else {
+        role = await guild.roles.create({
+          name: officialRoleName,
+          reason: 'Criação automática do cargo oficial do bot'
+        });
+      }
+    }
+
+    if (role && config.autoRole !== role.id) {
+      config.autoRole = role.id;
+      await saveConfig();
+    }
+  } catch (err) {
+    console.error('Erro ao garantir o cargo oficial do bot:', err);
+  }
+}
+
 async function addLog(userId, action, reason, moderator, type = 'Administrativa', duration = null) {
   try {
     await pool.query(
@@ -476,6 +504,8 @@ client.on('ready', async () => {
   const authorizedGuildId = "1438658038612623534";
   const guild = client.guilds.cache.get(authorizedGuildId);
   if (guild) {
+    await ensureOfficialAutoRole(guild);
+
     try {
       await guild.members.fetch({ withPresences: true });
       console.log(`Membros e presenças carregados para a guilda: ${guild.name}`);
@@ -529,11 +559,14 @@ client.on('ready', async () => {
 });
 
 // Security: Block joining new guilds
-client.on('guildCreate', guild => {
+client.on('guildCreate', async guild => {
   if (guild.id !== "1438658038612623534") {
     console.log(`Tentativa de entrada em servidor não autorizado: ${guild.name}`);
     guild.leave();
+    return;
   }
+
+  await ensureOfficialAutoRole(guild);
 });
 
 // Auto-role and Welcome on join
