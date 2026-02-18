@@ -363,16 +363,10 @@ async function ensureOfficialAutoRole(guild) {
     let role = guild.roles.cache.find(r => r.name === officialRoleName);
 
     if (!role) {
-      const oldRole = guild.roles.cache.find(r => r.name === 'Kisekai');
-
-      if (oldRole) {
-        role = await oldRole.setName(officialRoleName, 'Padronização do cargo oficial do bot');
-      } else {
-        role = await guild.roles.create({
-          name: officialRoleName,
-          reason: 'Criação automática do cargo oficial do bot'
-        });
-      }
+      role = await guild.roles.create({
+        name: officialRoleName,
+        reason: 'Criação automática do cargo oficial do bot'
+      });
     }
 
     if (role && config.autoRole !== role.id) {
