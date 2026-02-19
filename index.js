@@ -161,6 +161,11 @@ const authMiddleware = async (req, res, next) => {
   return res.status(401).json({ error: 'Acesso negado: Autenticação inválida ou ausente.' });
 };
 
+// Rota pública de healthcheck para o Railway (ANTES do middleware de autenticação)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Aplicar autenticação em todas as rotas de API
 app.use('/api/', authMiddleware);
 
