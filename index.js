@@ -413,6 +413,9 @@ async function initDb() {
           ALTER TABLE templates ADD COLUMN updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
           UPDATE templates SET updated_at = NOW() WHERE updated_at IS NULL;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='templates' AND column_name='deleted_at') THEN
+          ALTER TABLE templates ADD COLUMN deleted_at TIMESTAMPTZ;
+        END IF;
       END $$;
     `);
 
@@ -2453,6 +2456,8 @@ app.get('/api/templates', async (req, res) => {
       conditions.push(`created_by = $${params.length}`);
     }
 
+    // Sempre excluir templates da lixeira (soft delete)
+    conditions.push('deleted_at IS NULL');
     const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
     const countQuery = `SELECT COUNT(*) FROM templates${whereClause}`;
     const dataQuery = `SELECT * FROM templates${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
@@ -2508,34 +2513,113 @@ app.post('/api/templates', async (req, res) => {
 app.delete('/api/templates/:id', async (req, res) => {
   const { id } = req.params;
   const userId = req.user?.id;
+  const userRole = req.user?.role;
+  const { permanent } = req.query;
 
   try {
-    const { isOwner, isAdminCreator, isCreator } = await checkTemplatePermissions(userId, id);
-
-    if (!isOwner && !isAdminCreator && !isCreator) {
-      return res.status(403).json({ error: 'Permissão negada: Você não pode excluir este template.' });
+    // Buscar template para verificar permissões
+    const templateResult = await pool.query('SELECT * FROM templates WHERE id = $1', [id]);
+    if (templateResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Template não encontrado.' });
     }
+    
+    const template = templateResult.rows[0];
+    const isCreator = template.created_by === userId;
+    const isOwner = userRole === 'owner';
 
-    if (isOwner) {
-      // Dono pode excluir qualquer template
+    // Verificar se está na lixeira (já tem deleted_at)
+    const isInTrash = template.deleted_at !== null;
+
+    // OWNER: Pode fazer exclusão permanente se especificar ?permanent=true
+    if (isOwner && permanent === 'true') {
       await pool.query('DELETE FROM templates WHERE id = $1', [id]);
       return res.json({ success: true, message: 'Template excluído permanentemente.' });
     }
 
-    if (isAdminCreator) {
-      // Admin não criador pode solicitar exclusão
-      await pool.query(
-        'UPDATE templates SET deletion_requested_by = array_append(deletion_requested_by, $1) WHERE id = $2',
-        [userId, id]
-      );
-      return res.json({ success: true, message: 'Solicitação de exclusão enviada ao dono.' });
+    // OWNER: Por padrão, também envia para lixeira (soft delete)
+    if (isOwner && !isInTrash) {
+      await pool.query('UPDATE templates SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1', [id]);
+      return res.json({ success: true, message: 'Template apagado com sucesso.', inTrash: true });
     }
 
-    if (isCreator) {
-      // Criador pode excluir seu próprio template
-      await pool.query('DELETE FROM templates WHERE id = $1', [id]);
-      return res.json({ success: true, message: 'Template excluído.' });
+    // OWNER tentando apagar template que já está na lixeira (sem permanent=true)
+    if (isOwner && isInTrash) {
+      return res.status(400).json({ error: 'Este template já está na lixeira. Use ?permanent=true para excluir permanentemente.' });
     }
+
+    // NÃO-OWNER tentando excluir template de outro usuário
+    if (!isCreator) {
+      return res.status(403).json({ error: 'Permissão negada: Você só pode excluir templates criados por você.' });
+    }
+
+    // CRIADOR (não-owner): Soft delete - vai para lixeira
+    if (isCreator && !isInTrash) {
+      await pool.query('UPDATE templates SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1', [id]);
+      return res.json({ success: true, message: 'Template apagado com sucesso.', inTrash: true });
+    }
+
+    // Se já está na lixeira e o criador tenta excluir novamente
+    if (isCreator && isInTrash) {
+      return res.status(400).json({ error: 'Este template já está na lixeira. Apenas o dono pode esvaziá-la.' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get templates in trash (Owner only)
+app.get('/api/templates/trash', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode ver a lixeira.' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT * FROM templates WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
+    );
+
+    const templates = await Promise.all(result.rows.map(async (t) => {
+      const creatorInfo = await getUserInfo(t.created_by);
+      return { ...t, creatorInfo };
+    }));
+
+    res.json(templates);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Empty trash - delete all templates in trash (Owner only)
+app.delete('/api/templates/trash/clear', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode esvaziar a lixeira.' });
+  }
+
+  try {
+    const result = await pool.query('DELETE FROM templates WHERE deleted_at IS NOT NULL');
+    res.json({ success: true, message: `Lixeira esvaziada. ${result.rowCount} templates removidos permanentemente.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Restore template from trash (Owner only)
+app.post('/api/templates/:id/restore', async (req, res) => {
+  if (req.user?.role !== 'owner') {
+    return res.status(403).json({ error: 'Apenas o dono pode restaurar templates da lixeira.' });
+  }
+
+  try {
+    const result = await pool.query(
+      'UPDATE templates SET deleted_at = NULL WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Template não encontrado.' });
+    }
+
+    res.json({ success: true, message: 'Template restaurado com sucesso.', template: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
