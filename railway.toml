@@ -8,3 +8,6 @@ healthcheckPath = "/api/stats"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+
+# Railway define automaticamente a variável PORT
+# O servidor Express usa process.env.PORT || 3001
