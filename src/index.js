@@ -322,8 +322,19 @@ app.post('/api/bot/stop', async (req, res) => {
       lastActionTime: new Date().toISOString() 
     });
     
-    // Destruir conexão com Discord
-    await client.destroy();
+    // Destruir conexão com Discord (com tratamento de erro robusto)
+    try {
+      // Verificar se o client está realmente conectado antes de destruir
+      if (client && typeof client.destroy === 'function') {
+        // Verificar se não está já destruído
+        if (client.ws && client.ws.status !== 5) { // 5 = Disconnected
+          await client.destroy();
+        }
+      }
+    } catch (destroyErr) {
+      console.warn('Aviso ao destruir client Discord:', destroyErr.message);
+      // Continuar mesmo com erro - o importante é atualizar o estado
+    }
     
     // Atualizar estado final
     setBotState({ 
@@ -333,21 +344,32 @@ app.post('/api/bot/stop', async (req, res) => {
       lastError: null
     });
     
-    // Registrar log
-    await logAdminAction('bot_stop', userId, reason);
+    // Registrar log (não bloquear se falhar)
+    try {
+      await logAdminAction('bot_stop', userId, reason);
+    } catch (logErr) {
+      console.warn('Aviso ao registrar log:', logErr.message);
+    }
     
     console.log(`Bot desligado via dashboard por ${userId}`);
     
     // Notificar clientes WebSocket
-    const notification = JSON.stringify({
-      event: 'bot_stopped',
-      data: { userId, reason, timestamp: new Date().toISOString() }
-    });
-    wsClients.forEach(client => {
-      if (client.readyState === 1) { // WebSocket.OPEN
-        client.send(notification);
-      }
-    });
+    try {
+      const notification = JSON.stringify({
+        event: 'bot_stopped',
+        data: { userId, reason, timestamp: new Date().toISOString() }
+      });
+      wsClients.forEach(client => {
+        if (client.readyState === 1) { // WebSocket.OPEN
+          client.send(notification);
+        }
+      });
+      
+      // Também notificar via módulo WebSocket
+      notifyBotEvent('bot_stopped', { userId, reason, timestamp: new Date().toISOString() });
+    } catch (wsErr) {
+      console.warn('Aviso ao notificar WebSocket:', wsErr.message);
+    }
     
     res.json({ 
       success: true, 
@@ -360,6 +382,7 @@ app.post('/api/bot/stop', async (req, res) => {
     
     // Atualizar estado de erro
     setBotState({ 
+      isRunning: false,
       lastAction: 'stop_failed', 
       lastError: err.message 
     });

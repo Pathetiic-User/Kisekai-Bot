@@ -12,7 +12,7 @@ const client = new Client({
   ]
 });
 
-// Bot state management
+// Gerenciamento de estado do bot
 let botState = {
   isRunning: true,
   lastAction: null,
@@ -36,7 +36,7 @@ function isClientConnected() {
   try {
     // Verifica múltiplos indicadores de conexão
     return client.isReady?.() && 
-           client.ws?.status === 0 && // 0 = Ready
+           client.ws?.status === 0 && // 0 = Pronto
            client.user !== null;
   } catch {
     return false;
@@ -118,7 +118,7 @@ function acquireTransitionLock(timeout = 30000) {
   
   isTransitioning = true;
   
-  // Libera automaticamente após timeout (safety)
+  // Libera automaticamente após timeout (segurança)
   if (transitionTimeout) {
     clearTimeout(transitionTimeout);
   }
@@ -165,7 +165,7 @@ client.on('disconnect', (event) => {
     isRunning: false,
     lastAction: 'disconnected',
     lastActionTime: new Date().toISOString(),
-    lastError: `Disconnected: Code ${event.code}`
+    lastError: `Desconectado: Código ${event.code}`
   });
 });
 
