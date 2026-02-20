@@ -83,11 +83,27 @@ function setupUserRoutes(app, client) {
   app.get('/api/users/:id', async (req, res) => {
     try {
       const user = await client.users.fetch(req.params.id);
+      
+      // Try to get guild member data for displayName
+      const guild = client.guilds.cache.get(AUTHORIZED_GUILD_ID);
+      let displayName = null;
+      
+      if (guild) {
+        try {
+          const member = await guild.members.fetch(req.params.id);
+          displayName = member.displayName;
+        } catch {
+          // Member not in guild, use globalName as fallback
+        }
+      }
+      
       res.json({
         id: user.id,
         username: user.username,
+        globalName: user.globalName,
+        displayName: displayName || user.globalName,
         avatar: user.avatar,
-        avatarURL: user.displayAvatarURL()
+        avatarURL: user.displayAvatarURL({ dynamic: true, size: 256 })
       });
     } catch (err) {
       res.status(404).json({ error: 'Usuário não encontrado' });
