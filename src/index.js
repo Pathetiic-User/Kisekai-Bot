@@ -37,7 +37,7 @@ registerEvents();
 // Configurar todas as rotas
 setupAuthRoutes(app, client);
 setupUserRoutes(app, client);
-setupReportRoutes(app, client);
+setupReportRoutes(app, client, upload);
 setupModerationRoutes(app, client);
 setupSweepstakeRoutes(app, client);
 setupTemplateRoutes(app, client);

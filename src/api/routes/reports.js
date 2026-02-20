@@ -2,7 +2,7 @@ const { AUTHORIZED_GUILD_ID, DASHBOARD_ROLE_ID, pool, supabase } = require('../.
 const { addLog, createCustomEmbed, uploadToSupabase } = require('../../utils');
 const ms = require('ms');
 
-function setupReportRoutes(app, client) {
+function setupReportRoutes(app, client, upload) {
   // Get all reports
   app.get('/api/reports', async (req, res) => {
     try {
@@ -46,7 +46,7 @@ function setupReportRoutes(app, client) {
   });
 
   // Create report
-  app.post('/api/reports', async (req, res) => {
+  app.post('/api/reports', upload.single('image'), async (req, res) => {
     const { reportedUserId, reportedUsername, reason } = req.body;
     const reporterId = req.user?.id || 'Dashboard';
 
@@ -76,6 +76,7 @@ function setupReportRoutes(app, client) {
 
       res.json({ success: true, report: result.rows[0] });
     } catch (err) {
+      console.error('Erro ao criar reporte:', err);
       res.status(500).json({ error: err.message });
     }
   });
