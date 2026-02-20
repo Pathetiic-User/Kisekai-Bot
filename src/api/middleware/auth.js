@@ -4,12 +4,13 @@ const { getSessionTokenFromRequest } = require('../../utils');
 
 // Middleware de Autenticação da API
 const authMiddleware = async (req, res, next) => {
-  // Excluir rotas de login da verificação
+  // Excluir rotas públicas da verificação
   if (
     req.path.startsWith('/auth/login') ||
     req.path.startsWith('/auth/callback') ||
     req.path.startsWith('/auth/me') ||
-    req.path.startsWith('/auth/logout')
+    req.path.startsWith('/auth/logout') ||
+    req.path === '/users/search' // Permitir busca de usuários na página de suporte
   ) return next();
 
   const apiKey = req.headers['x-api-key'];
