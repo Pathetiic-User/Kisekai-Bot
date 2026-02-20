@@ -1,4 +1,4 @@
-const { client, getBotState, setBotState } = require('./client');
+const { client } = require('./client');
 const events = require('./events');
 
 // Registrar todos os eventos
@@ -10,7 +10,5 @@ function registerEvents() {
 
 module.exports = {
   client,
-  getBotState,
-  setBotState,
   registerEvents
 };
