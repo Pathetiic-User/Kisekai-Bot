@@ -214,6 +214,14 @@ const client = new Client({
 
 let config = {};
 const spamMap = new Map();
+
+// Bot state management
+let botState = {
+  isRunning: true,
+  lastAction: null, // 'started' | 'stopped'
+  lastActionTime: null
+};
+
 let usersCache = {
   data: null,
   lastFetched: 0
@@ -2680,6 +2688,65 @@ app.post('/api/templates/:id/reject-delete', async (req, res) => {
     await pool.query('UPDATE templates SET deletion_requested_by = ARRAY[]::TEXT[] WHERE id = $1', [req.params.id]);
     res.json({ success: true, message: 'Solicitação rejeitada.' });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bot state API endpoints
+app.get('/api/bot/state', (req, res) => {
+  res.json({
+    isRunning: botState.isRunning,
+    lastAction: botState.lastAction,
+    lastActionTime: botState.lastActionTime
+  });
+});
+
+app.post('/api/bot/stop', async (req, res) => {
+  if (!botState.isRunning) {
+    return res.status(400).json({ error: 'O bot já está desligado.' });
+  }
+
+  try {
+    botState.isRunning = false;
+    botState.lastAction = 'stopped';
+    botState.lastActionTime = new Date().toISOString();
+
+    // Destroy Discord client connection
+    await client.destroy();
+    console.log('Bot desligado via dashboard.');
+    
+    res.json({ 
+      success: true, 
+      message: 'Bot desligado com sucesso.',
+      isRunning: false 
+    });
+  } catch (err) {
+    console.error('Erro ao desligar o bot:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/bot/start', async (req, res) => {
+  if (botState.isRunning) {
+    return res.status(400).json({ error: 'O bot já está ligado.' });
+  }
+
+  try {
+    // Login to Discord
+    await client.login(process.env.DISCORD_TOKEN);
+    botState.isRunning = true;
+    botState.lastAction = 'started';
+    botState.lastActionTime = new Date().toISOString();
+    
+    console.log('Bot ligado via dashboard.');
+    
+    res.json({ 
+      success: true, 
+      message: 'Bot ligado com sucesso.',
+      isRunning: true 
+    });
+  } catch (err) {
+    console.error('Erro ao ligar o bot:', err);
     res.status(500).json({ error: err.message });
   }
 });
