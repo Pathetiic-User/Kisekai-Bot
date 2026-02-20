@@ -2,22 +2,8 @@ const { AUTHORIZED_GUILD_ID, pool } = require('../../config');
 const { getCachedDiscordUserSummary, getUsersCache, isUsersCacheValid } = require('../../utils');
 
 function setupUserRoutes(app, client) {
-  // Get user by ID
-  app.get('/api/users/:id', async (req, res) => {
-    try {
-      const user = await client.users.fetch(req.params.id);
-      res.json({
-        id: user.id,
-        username: user.username,
-        avatar: user.avatar,
-        avatarURL: user.displayAvatarURL()
-      });
-    } catch (err) {
-      res.status(404).json({ error: 'Usuário não encontrado' });
-    }
-  });
-
   // Search users - uses local cache to avoid Discord rate limits
+  // MUST be defined BEFORE /api/users/:id to avoid route conflict
   app.get('/api/users/search', async (req, res) => {
     const { q } = req.query;
     if (!q || q.length < 2) return res.json([]);
@@ -90,6 +76,21 @@ function setupUserRoutes(app, client) {
     } catch (err) {
       console.error('User search error:', err);
       res.status(500).json({ error: 'Erro ao buscar usuários.' });
+    }
+  });
+
+  // Get user by ID
+  app.get('/api/users/:id', async (req, res) => {
+    try {
+      const user = await client.users.fetch(req.params.id);
+      res.json({
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        avatarURL: user.displayAvatarURL()
+      });
+    } catch (err) {
+      res.status(404).json({ error: 'Usuário não encontrado' });
     }
   });
 
