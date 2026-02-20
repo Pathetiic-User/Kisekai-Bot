@@ -76,19 +76,34 @@ app.get('/api/stats', async (req, res) => {
 
   const guild = client.guilds.cache.get(config.AUTHORIZED_GUILD_ID);
   
-  if (guild) {
+  // Verificar se o client está pronto antes de fazer operações
+  if (guild && client.isReady && client.isReady()) {
     try {
       await guild.fetch();
     } catch (e) {
-      console.error("Erro ao atualizar guilda:", e);
+      // Ignora erros de rate limit ou shard desligado
+      if (e.code !== 'ShardingRequired' && !e.message.includes('rate limited') && !e.message.includes('Shard')) {
+        console.error("Erro ao atualizar guilda:", e.message);
+      }
     }
 
-    if (!guild.lastMemberFetch || (Date.now() - guild.lastMemberFetch > 60000)) {
-      try {
-        await guild.members.fetch({ withPresences: true });
-        guild.lastMemberFetch = Date.now();
-      } catch (e) {
-        console.error("Erro ao carregar membros:", e);
+    // Aumenta o intervalo para 5 minutos e só faz fetch se não houver rate limit recente
+    const lastRateLimit = global.lastMemberRateLimit || 0;
+    const timeSinceLastRateLimit = Date.now() - lastRateLimit;
+    
+    if (!guild.lastMemberFetch || (Date.now() - guild.lastMemberFetch > 300000)) {
+      if (timeSinceLastRateLimit > 60000) { // Espera 1 minuto após rate limit
+        try {
+          await guild.members.fetch({ withPresences: true });
+          guild.lastMemberFetch = Date.now();
+        } catch (e) {
+          if (e.message.includes('rate limited')) {
+            global.lastMemberRateLimit = Date.now();
+            console.log("Rate limit ao carregar membros, tentando novamente mais tarde.");
+          } else if (!e.message.includes('Shard') && !e.message.includes('token')) {
+            console.error("Erro ao carregar membros:", e.message);
+          }
+        }
       }
     }
   }
