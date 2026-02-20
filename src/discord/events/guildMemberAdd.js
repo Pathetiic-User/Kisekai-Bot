@@ -1,8 +1,22 @@
 const { getConfig } = require('../../config');
-const { logToChannel, createCustomEmbed } = require('../../utils');
+const { logToChannel, createCustomEmbed, addUserToCache } = require('../../utils');
 
 module.exports = function(client) {
   return async (member) => {
+    // Add new member to cache for search functionality
+    addUserToCache({
+      id: member.user.id,
+      username: member.user.username,
+      globalName: member.user.globalName,
+      displayName: member.displayName,
+      avatar: member.user.avatar,
+      avatarURL: member.user.displayAvatarURL({ size: 256 }),
+      status: member.presence?.status || 'offline',
+      isBot: member.user.bot,
+      isApp: member.user.bot,
+      isOwner: member.id === member.guild.ownerId
+    });
+
     // Nunca alterar cargos de bots
     if (member.user.bot) return;
 

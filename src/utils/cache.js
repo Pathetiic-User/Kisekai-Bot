@@ -51,6 +51,29 @@ function setUsersCache(data) {
   };
 }
 
+function addUserToCache(userData) {
+  if (!usersCache.data) {
+    usersCache.data = [];
+  }
+  
+  // Check if user already exists in cache
+  const existingIndex = usersCache.data.findIndex(u => u.id === userData.id);
+  
+  if (existingIndex !== -1) {
+    // Update existing user
+    usersCache.data[existingIndex] = userData;
+  } else {
+    // Add new user
+    usersCache.data.push(userData);
+  }
+}
+
+function removeUserFromCache(userId) {
+  if (!usersCache.data) return;
+  
+  usersCache.data = usersCache.data.filter(u => u.id !== userId);
+}
+
 function isUsersCacheValid(duration = 5 * 60 * 1000) {
   return usersCache.data && (Date.now() - usersCache.lastFetched < duration);
 }
@@ -85,6 +108,8 @@ module.exports = {
   getCachedDiscordUserSummary,
   getUsersCache,
   setUsersCache,
+  addUserToCache,
+  removeUserFromCache,
   isUsersCacheValid,
   getStatsCache,
   setStatsCache,

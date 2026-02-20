@@ -1,5 +1,5 @@
 const { AUTHORIZED_GUILD_ID, pool } = require('../../config');
-const { getCachedDiscordUserSummary } = require('../../utils');
+const { getCachedDiscordUserSummary, getUsersCache, isUsersCacheValid } = require('../../utils');
 
 function setupUserRoutes(app, client) {
   // Get user by ID
@@ -17,28 +17,75 @@ function setupUserRoutes(app, client) {
     }
   });
 
-  // Search users
+  // Search users - uses local cache to avoid Discord rate limits
   app.get('/api/users/search', async (req, res) => {
     const { q } = req.query;
-    if (!q) return res.json([]);
+    if (!q || q.length < 2) return res.json([]);
 
     try {
-      const guild = client.guilds.cache.get(AUTHORIZED_GUILD_ID);
+      const searchLower = q.toLowerCase();
+      const cached = getUsersCache();
       
+      // If we have cached users, filter them locally
+      if (cached.data && cached.data.length > 0) {
+        const results = cached.data
+          .filter(user => {
+            const username = (user.username || '').toLowerCase();
+            const globalName = (user.globalName || '').toLowerCase();
+            const displayName = (user.displayName || '').toLowerCase();
+            
+            return (
+              username.includes(searchLower) ||
+              globalName.includes(searchLower) ||
+              displayName.includes(searchLower)
+            );
+          })
+          .slice(0, 20)
+          .map(user => ({
+            id: user.id,
+            username: user.username,
+            globalName: user.globalName,
+            displayName: user.displayName,
+            avatarURL: user.avatarURL,
+            status: user.status || 'offline'
+          }));
+        
+        return res.json(results);
+      }
+      
+      // Fallback: try to fetch from Discord guild cache (no API call)
+      const guild = client.guilds.cache.get(AUTHORIZED_GUILD_ID);
       if (!guild) {
         return res.status(404).json({ error: 'Servidor não encontrado ou bot não carregado.' });
       }
-
-      const members = await guild.members.fetch({ query: q, limit: 20, withPresences: true });
-      const results = members.map(m => ({
-        id: m.user.id,
-        username: m.user.username,
-        globalName: m.user.globalName,
-        displayName: m.displayName,
-        avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 }),
-        status: m.presence?.status || 'offline'
-      }));
-
+      
+      // Use guild's cached members (already in memory, no API call)
+      const members = guild.members.cache;
+      const results = [];
+      
+      for (const [id, m] of members) {
+        if (results.length >= 20) break;
+        
+        const username = (m.user.username || '').toLowerCase();
+        const globalName = (m.user.globalName || '').toLowerCase();
+        const displayName = (m.displayName || '').toLowerCase();
+        
+        if (
+          username.includes(searchLower) ||
+          globalName.includes(searchLower) ||
+          displayName.includes(searchLower)
+        ) {
+          results.push({
+            id: m.user.id,
+            username: m.user.username,
+            globalName: m.user.globalName,
+            displayName: m.displayName,
+            avatarURL: m.user.displayAvatarURL({ dynamic: true, size: 256 }),
+            status: m.presence?.status || 'offline'
+          });
+        }
+      }
+      
       res.json(results);
     } catch (err) {
       console.error('User search error:', err);
