@@ -97,6 +97,50 @@ function setupTemplateRoutes(app, client) {
     }
   });
 
+  // Update template
+  app.put('/api/templates/:id', async (req, res) => {
+    const { id } = req.params;
+    const { name, data } = req.body;
+    const userId = req.user?.id;
+    const userRole = req.user?.role;
+
+    try {
+      // Buscar template para verificar permissões
+      const templateResult = await pool.query('SELECT * FROM templates WHERE id = $1', [id]);
+      if (templateResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Template não encontrado.' });
+      }
+      
+      const template = templateResult.rows[0];
+      const isCreator = template.created_by === userId;
+      const isOwner = userRole === 'owner';
+
+      // Verificar permissão: Owner ou criador podem editar
+      if (!isOwner && !isCreator) {
+        return res.status(403).json({ error: 'Permissão negada: Você só pode editar templates criados por você.' });
+      }
+
+      // Verificar se não está na lixeira
+      if (template.deleted_at !== null) {
+        return res.status(400).json({ error: 'Não é possível editar um template que está na lixeira.' });
+      }
+
+      // Atualizar template
+      const updateResult = await pool.query(
+        'UPDATE templates SET name = $1, data = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *',
+        [name, data, id]
+      );
+
+      const updatedTemplate = updateResult.rows[0];
+      const creatorInfo = await getUserInfo(updatedTemplate.created_by, client);
+      const role = await getUserRole(updatedTemplate.created_by, client);
+
+      res.json({ ...updatedTemplate, creatorInfo, role });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Delete template
   app.delete('/api/templates/:id', async (req, res) => {
     const { id } = req.params;
