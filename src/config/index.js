@@ -21,7 +21,15 @@ async function loadConfig() {
       sweepstakeChannel: "1464266529058193429",
       adminRole: "1464264578773811301",
       customEmbeds: {
-        welcome: { enabled: false, channel: "1438658039656743024", title: "Bem-vindo!", description: "Bem-vindo ao servidor, {user}!", color: "#00ff00" },
+        welcome: { 
+          enabled: true, 
+          channel: "1438658039656743024", 
+          image: "https://c.tenor.com/S7A7EndmFLsAAAAC/tenor.gif",
+          title: "<a:99042danceparty:1474903472783495292> Bem-vindo(a) {user} ao servidor! <a:99042danceparty:1474903472783495292>", 
+          description: "Agora você faz parte da comunidade **Kisekai**, seja muito Bem-Vindo(a)!\nVocê é o membro de numero {memberCount}!\nEsperamos que você se divirta, faça amizades e aproveite tudo que preparamos", 
+          color: 2006500,
+          footer: "Aklai | Gestão"
+        },
         reportFeedback: { enabled: true, title: "Reporte Enviado", description: "Seu reporte contra {user} foi recebido com sucesso.", color: "#ffff00" },
         resolvedReport: { enabled: true, title: "✅ Reporte Bem-Sucedido", description: "Um reporte foi analisado e o usuário foi punido.", color: "#00ff00", fields: [{ name: "👤 Usuário Punido", value: "{reported_tag}", inline: true }, { name: "🚩 Motivo", value: "{reason}", inline: false }] }
       }
