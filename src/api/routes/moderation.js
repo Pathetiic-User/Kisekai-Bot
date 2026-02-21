@@ -165,10 +165,31 @@ async function sendWarnEmbed(guild, user, moderator, reason, reportId, reporterI
   const { getConfig } = require('../../config');
   const config = getConfig();
   
-  if (!config.punishmentChannel) return;
+  console.log('[DEBUG] sendWarnEmbed - punishmentChannel:', config.punishmentChannel);
   
-  const channel = guild.channels.cache.get(config.punishmentChannel);
-  if (!channel) return;
+  if (!config.punishmentChannel) {
+    console.error('[ERRO] punishmentChannel não configurado!');
+    return;
+  }
+  
+  let channel = guild.channels.cache.get(config.punishmentChannel);
+  
+  if (!channel) {
+    console.log('[DEBUG] Canal não no cache, tentando fetch...');
+    try {
+      channel = await guild.channels.fetch(config.punishmentChannel);
+    } catch (e) {
+      console.error('[ERRO] Não foi possível buscar o canal:', e.message);
+      return;
+    }
+  }
+  
+  if (!channel) {
+    console.error('[ERRO] Canal de punições não encontrado!');
+    return;
+  }
+  
+  console.log('[DEBUG] Canal encontrado:', channel.name);
   
   const reportInfo = await getReportInfo(reportId);
   const totalWarns = await getTotalWarns(user.id);
@@ -264,10 +285,31 @@ async function sendBanEmbed(guild, user, moderator, reason, duration, isPermanen
   const { getConfig } = require('../../config');
   const config = getConfig();
   
-  if (!config.punishmentChannel) return;
+  console.log('[DEBUG] sendBanEmbed - punishmentChannel:', config.punishmentChannel);
   
-  const channel = guild.channels.cache.get(config.punishmentChannel);
-  if (!channel) return;
+  if (!config.punishmentChannel) {
+    console.error('[ERRO] punishmentChannel não configurado!');
+    return;
+  }
+  
+  let channel = guild.channels.cache.get(config.punishmentChannel);
+  
+  if (!channel) {
+    console.log('[DEBUG] Canal não no cache, tentando fetch...');
+    try {
+      channel = await guild.channels.fetch(config.punishmentChannel);
+    } catch (e) {
+      console.error('[ERRO] Não foi possível buscar o canal:', e.message);
+      return;
+    }
+  }
+  
+  if (!channel) {
+    console.error('[ERRO] Canal de punições não encontrado!');
+    return;
+  }
+  
+  console.log('[DEBUG] Canal encontrado:', channel.name);
   
   const reportInfo = await getReportInfo(reportId);
   const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
@@ -309,10 +351,31 @@ async function sendMuteEmbed(guild, user, moderator, reason, duration, reportId,
   const { getConfig } = require('../../config');
   const config = getConfig();
   
-  if (!config.punishmentChannel) return;
+  console.log('[DEBUG] sendMuteEmbed - punishmentChannel:', config.punishmentChannel);
   
-  const channel = guild.channels.cache.get(config.punishmentChannel);
-  if (!channel) return;
+  if (!config.punishmentChannel) {
+    console.error('[ERRO] punishmentChannel não configurado!');
+    return;
+  }
+  
+  let channel = guild.channels.cache.get(config.punishmentChannel);
+  
+  if (!channel) {
+    console.log('[DEBUG] Canal não no cache, tentando fetch...');
+    try {
+      channel = await guild.channels.fetch(config.punishmentChannel);
+    } catch (e) {
+      console.error('[ERRO] Não foi possível buscar o canal:', e.message);
+      return;
+    }
+  }
+  
+  if (!channel) {
+    console.error('[ERRO] Canal de punições não encontrado!');
+    return;
+  }
+  
+  console.log('[DEBUG] Canal encontrado:', channel.name);
   
   const reportInfo = await getReportInfo(reportId);
   const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
