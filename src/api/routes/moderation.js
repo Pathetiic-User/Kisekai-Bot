@@ -51,7 +51,7 @@ function parseDurationToMs(duration) {
 }
 
 // Helper function to calculate punishment status
-function calculatePunishmentStatus(log, isCurrentlyBanned, isCurrentlyMuted, muteEndsAt) {
+function calculatePunishmentStatus(log, isCurrentlyBanned, isCurrentlyMuted, muteEndsAt, activeBanTimestamp, activeMuteTimestamp) {
   const action = log.action.toLowerCase();
   const isBan = action === 'ban';
   const isMute = action === 'mute';
@@ -65,7 +65,11 @@ function calculatePunishmentStatus(log, isCurrentlyBanned, isCurrentlyMuted, mut
   
   // If permanent ban
   if (isBan && log.duration === 'permanent') {
-    if (isCurrentlyBanned) {
+    // Check if THIS ban is the active one by comparing timestamps
+    const isThisActiveBan = isCurrentlyBanned && activeBanTimestamp && 
+      new Date(log.timestamp).getTime() >= new Date(activeBanTimestamp).getTime();
+    
+    if (isThisActiveBan) {
       return { status: 'Ativo', expiresAt: null, remainingMs: null, isPermanent: true, isActive: true };
     } else {
       return { status: 'Expirando', expiresAt: null, remainingMs: null, isPermanent: true, isActive: false };
@@ -82,8 +86,20 @@ function calculatePunishmentStatus(log, isCurrentlyBanned, isCurrentlyMuted, mut
   const now = Date.now();
   const remainingMs = expiresAt.getTime() - now;
   
-  // Check if punishment is still active on Discord
-  const isActive = isBan ? isCurrentlyBanned : (isCurrentlyMuted && muteEndsAt && new Date(muteEndsAt) > now);
+  // Check if THIS specific punishment is still active by comparing timestamps
+  let isActive = false;
+  
+  if (isBan && isCurrentlyBanned) {
+    // For bans: check if this ban's timestamp matches the most recent ban
+    isActive = activeBanTimestamp && 
+      Math.abs(new Date(log.timestamp).getTime() - new Date(activeBanTimestamp).getTime()) < 1000; // Within 1 second tolerance
+  } else if (isMute && isCurrentlyMuted && muteEndsAt && new Date(muteEndsAt) > now) {
+    // For mutes: check if this mute's calculated end time matches the actual mute end time
+    const calculatedEndsAt = startTime + durationMs;
+    const actualMuteEndsAt = new Date(muteEndsAt).getTime();
+    // Allow 5 second tolerance for timing differences
+    isActive = Math.abs(calculatedEndsAt - actualMuteEndsAt) < 5000;
+  }
   
   if (isActive) {
     // Punishment is active - show countdown
@@ -351,16 +367,38 @@ function setupModerationRoutes(app, client) {
       let isBanned = false;
       let isMuted = false;
       let muteEndsAt = null;
+      let activeBanTimestamp = null;
+      let activeMuteTimestamp = null;
 
       if (guild) {
         try {
           const banInfo = await guild.bans.fetch(userId).catch(() => null);
           isBanned = !!banInfo;
+          
+          // Get the timestamp of the most recent ban from database if user is banned
+          if (isBanned) {
+            const activeBanResult = await pool.query(
+              "SELECT timestamp FROM logs WHERE user_id = $1 AND action ILIKE 'ban%' ORDER BY timestamp DESC LIMIT 1",
+              [userId]
+            );
+            if (activeBanResult.rows.length > 0) {
+              activeBanTimestamp = activeBanResult.rows[0].timestamp;
+            }
+          }
 
           const member = await guild.members.fetch(userId).catch(() => null);
           if (member && member.communicationDisabledUntil && member.communicationDisabledUntil > new Date()) {
             isMuted = true;
             muteEndsAt = member.communicationDisabledUntil;
+            
+            // Get the timestamp of the most recent mute from database if user is muted
+            const activeMuteResult = await pool.query(
+              "SELECT timestamp FROM logs WHERE user_id = $1 AND action ILIKE 'mute%' ORDER BY timestamp DESC LIMIT 1",
+              [userId]
+            );
+            if (activeMuteResult.rows.length > 0) {
+              activeMuteTimestamp = activeMuteResult.rows[0].timestamp;
+            }
           }
         } catch (e) {
           console.error('Error fetching Discord status:', e);
@@ -369,7 +407,7 @@ function setupModerationRoutes(app, client) {
 
       // Process history with correct status calculation
       const history = result.rows.map(row => {
-        const statusInfo = calculatePunishmentStatus(row, isBanned, isMuted, muteEndsAt);
+        const statusInfo = calculatePunishmentStatus(row, isBanned, isMuted, muteEndsAt, activeBanTimestamp, activeMuteTimestamp);
         
         return {
           ...row,
