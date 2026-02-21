@@ -1,5 +1,6 @@
 const { AUTHORIZED_GUILD_ID, pool } = require('../../config');
-const { addLog, createCustomEmbed, uploadToSupabase, logToChannel } = require('../../utils');
+const { addLog, uploadToSupabase, logToChannel } = require('../../utils');
+const { EmbedBuilder } = require('discord.js');
 const ms = require('ms');
 
 // Helper function to parse duration string to milliseconds
@@ -124,6 +125,230 @@ function calculatePunishmentStatus(log, isCurrentlyBanned, isCurrentlyMuted, mut
   }
 }
 
+// Format duration for display
+function formatDuration(duration) {
+  if (!duration || duration === 'permanent') return 'Permanente';
+  return duration;
+}
+
+// Get report info for embeds
+async function getReportInfo(reportId) {
+  if (!reportId) return null;
+  try {
+    const result = await pool.query(
+      'SELECT timestamp, reporter_id FROM reports WHERE id = $1',
+      [reportId]
+    );
+    return result.rows[0] || null;
+  } catch (err) {
+    console.error('Error fetching report info:', err);
+    return null;
+  }
+}
+
+// Get total warns for user
+async function getTotalWarns(userId) {
+  try {
+    const result = await pool.query(
+      "SELECT COUNT(*) FROM logs WHERE user_id = $1 AND action ILIKE 'warn%'",
+      [userId]
+    );
+    return parseInt(result.rows[0].count) || 0;
+  } catch (err) {
+    console.error('Error fetching warn count:', err);
+    return 0;
+  }
+}
+
+// Send warn embed to punishment channel
+async function sendWarnEmbed(guild, user, moderator, reason, reportId, reporterId) {
+  const { getConfig } = require('../../config');
+  const config = getConfig();
+  
+  if (!config.punishmentChannel) return;
+  
+  const channel = guild.channels.cache.get(config.punishmentChannel);
+  if (!channel) return;
+  
+  const reportInfo = await getReportInfo(reportId);
+  const totalWarns = await getTotalWarns(user.id);
+  
+  const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
+  const formattedDate = data.toLocaleDateString('pt-BR');
+  
+  // Fetch reporter name
+  let reporterName = 'Desconhecido';
+  if (reportInfo?.reporter_id || reporterId) {
+    try {
+      const reporter = await guild.client.users.fetch(reportInfo?.reporter_id || reporterId);
+      reporterName = reporter.username;
+    } catch (e) {
+      reporterName = 'Desconhecido';
+    }
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('⚠️ Usuário Advertido')
+    .setColor(15774216)
+    .setImage('https://c.tenor.com/yPN5IxWh-xwAAAAC/tenor.gif')
+    .setDescription(`O reporte realizado em **${formattedDate}** por **${reporterName}** foi analisado e as medidas necessárias foram aplicadas ao usuário ${user}.`)
+    .addFields(
+      {
+        name: '📋 Detalhes',
+        value: `• Administrador: <@${moderator.id || moderator}>\n• Motivo: ${reason || 'Não informado'}\n• Total de advertências: ${totalWarns}`
+      },
+      {
+        name: '⚠️ Aviso',
+        value: 'Advertências são registradas em nosso sistema. Quanto maior a quantidade, mais severas serão as punições futuras.'
+      }
+    )
+    .setTimestamp();
+  
+  await channel.send({ embeds: [embed] });
+}
+
+// Send DM before ban
+async function sendBanDM(user, guild, reason, duration, isPermanent, moderator, reportInfo, reporterName) {
+  try {
+    const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
+    const formattedDate = data.toLocaleDateString('pt-BR');
+    
+    let embed;
+    
+    if (isPermanent) {
+      embed = new EmbedBuilder()
+        .setTitle('🚫 Você foi banido permanentemente')
+        .setColor(15158332)
+        .setDescription(`Você foi banido permanentemente do servidor **${guild.name}**.`)
+        .addFields(
+          {
+            name: '📋 Detalhes',
+            value: `• Motivo: ${reason || 'Não informado'}\n• Data: ${formattedDate}`
+          },
+          {
+            name: '⚠️ Aviso',
+            value: 'Este banimento é permanente e não poderá ser revertido.'
+          }
+        )
+        .setImage('https://c.tenor.com/w3KbwTJ-F5IAAAAd/tenor.gif')
+        .setTimestamp();
+    } else {
+      embed = new EmbedBuilder()
+        .setTitle('🚫 Usuário Banido')
+        .setColor(15158332)
+        .setImage('https://c.tenor.com/w3KbwTJ-F5IAAAAd/tenor.gif')
+        .setDescription(`O reporte realizado em **${formattedDate}** por **${reporterName}** foi analisado e resultou no banimento do usuário ${user}.`)
+        .addFields(
+          {
+            name: '📋 Detalhes',
+            value: `• Administrador: ${moderator.username || moderator}\n• Motivo: ${reason || 'Não informado'}\n• Duração: ${formatDuration(duration)}`
+          },
+          {
+            name: '⚠️ Aviso',
+            value: 'Banimentos permanentes são irreversíveis. Revise as regras antes de interagir novamente em nossas plataformas.'
+          }
+        )
+        .setTimestamp();
+    }
+    
+    await user.send({ embeds: [embed] });
+    return true;
+  } catch (e) {
+    console.error(`Não foi possível enviar DM para ${user.tag}:`, e.message);
+    return false;
+  }
+}
+
+// Send ban embed to punishment channel
+async function sendBanEmbed(guild, user, moderator, reason, duration, isPermanent, reportId, reporterId) {
+  const { getConfig } = require('../../config');
+  const config = getConfig();
+  
+  if (!config.punishmentChannel) return;
+  
+  const channel = guild.channels.cache.get(config.punishmentChannel);
+  if (!channel) return;
+  
+  const reportInfo = await getReportInfo(reportId);
+  const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
+  const formattedDate = data.toLocaleDateString('pt-BR');
+  
+  // Fetch reporter name
+  let reporterName = 'Desconhecido';
+  if (reportInfo?.reporter_id || reporterId) {
+    try {
+      const reporter = await guild.client.users.fetch(reportInfo?.reporter_id || reporterId);
+      reporterName = reporter.username;
+    } catch (e) {
+      reporterName = 'Desconhecido';
+    }
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🚫 Usuário Banido')
+    .setColor(15158332)
+    .setImage('https://c.tenor.com/w3KbwTJ-F5IAAAAd/tenor.gif')
+    .setDescription(`O reporte realizado em **${formattedDate}** por **${reporterName}** foi analisado e resultou no banimento do usuário ${user}.`)
+    .addFields(
+      {
+        name: '📋 Detalhes',
+        value: `• Administrador: <@${moderator.id || moderator}>\n• Motivo: ${reason || 'Não informado'}\n• Duração: ${isPermanent ? 'Permanente' : formatDuration(duration)}`
+      },
+      {
+        name: '⚠️ Aviso',
+        value: 'Banimentos permanentes são irreversíveis. Revise as regras antes de interagir novamente em nossas plataformas.'
+      }
+    )
+    .setTimestamp();
+  
+  await channel.send({ embeds: [embed] });
+}
+
+// Send mute embed to punishment channel
+async function sendMuteEmbed(guild, user, moderator, reason, duration, reportId, reporterId) {
+  const { getConfig } = require('../../config');
+  const config = getConfig();
+  
+  if (!config.punishmentChannel) return;
+  
+  const channel = guild.channels.cache.get(config.punishmentChannel);
+  if (!channel) return;
+  
+  const reportInfo = await getReportInfo(reportId);
+  const data = reportInfo ? new Date(reportInfo.timestamp) : new Date();
+  const formattedDate = data.toLocaleDateString('pt-BR');
+  
+  // Fetch reporter name
+  let reporterName = 'Desconhecido';
+  if (reportInfo?.reporter_id || reporterId) {
+    try {
+      const reporter = await guild.client.users.fetch(reportInfo?.reporter_id || reporterId);
+      reporterName = reporter.username;
+    } catch (e) {
+      reporterName = 'Desconhecido';
+    }
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🔇 Usuário Silenciado')
+    .setColor(6447716)
+    .setImage('https://c.tenor.com/aw9kafHjB2YAAAAC/tenor.gif')
+    .setDescription(`O reporte realizado em **${formattedDate}** por **${reporterName}** foi analisado e resultou no silenciamento do usuário ${user}.`)
+    .addFields(
+      {
+        name: '📋 Detalhes',
+        value: `• Administrador: <@${moderator.id || moderator}>\n• Motivo: ${reason || 'Não informado'}\n• Duração: ${formatDuration(duration)}`
+      },
+      {
+        name: '⚠️ Aviso',
+        value: 'Durante o período de silenciamento, o usuário não poderá enviar mensagens ou interagir nos canais do servidor.'
+      }
+    )
+    .setTimestamp();
+  
+  await channel.send({ embeds: [embed] });
+}
+
 function setupModerationRoutes(app, client) {
   // Get punishments
   app.get('/api/moderation/punishments', async (req, res) => {
@@ -206,12 +431,12 @@ function setupModerationRoutes(app, client) {
 
   // Get punished users
   app.get('/api/moderation/punished-users', async (req, res) => {
-    const { filter } = req.query; // ban, mute, kick, warn
+    const { filter } = req.query; // ban, mute, warn
     try {
       let query = `
         SELECT user_id, MAX(timestamp) as last_punishment
         FROM logs
-        WHERE type = 'Administrativa' AND action != 'innocent'
+        WHERE type = 'Administrativa' AND action IN ('ban', 'mute', 'warn')
       `;
       const params = [];
 
@@ -303,16 +528,6 @@ function setupModerationRoutes(app, client) {
   // Get moderation history
   app.get('/api/moderation/history', async (req, res) => {
     try {
-      const kicksRaw = await pool.query("SELECT * FROM logs WHERE action ILIKE 'kick' ORDER BY timestamp DESC");
-      const kicks = await Promise.all(kicksRaw.rows.map(async (row) => {
-        try {
-          const user = await client.users.fetch(row.user_id);
-          return { ...row, username: user.username, avatarURL: user.displayAvatarURL() };
-        } catch (e) {
-          return { ...row, username: 'Unknown', avatarURL: null };
-        }
-      }));
-
       const warns = await pool.query("SELECT * FROM logs WHERE action ILIKE 'warn%' ORDER BY timestamp DESC");
       
       // Group warnings by user
@@ -345,7 +560,6 @@ function setupModerationRoutes(app, client) {
       }
 
       res.json({ 
-        kicks, 
         warnHistory: Object.values(warnHistory) 
       });
     } catch (err) {
@@ -423,7 +637,6 @@ function setupModerationRoutes(app, client) {
       const summary = {
         bans: history.filter(h => h.action.toLowerCase() === 'ban'),
         mutes: history.filter(h => h.action.toLowerCase() === 'mute'),
-        kicks: history.filter(h => h.action.toLowerCase() === 'kick'),
         warns: history.filter(h => h.action.toLowerCase().startsWith('warn'))
       };
 
@@ -440,7 +653,7 @@ function setupModerationRoutes(app, client) {
     }
   });
 
-  // Moderate user (kick, ban, mute, warn)
+  // Moderate user (ban, mute, warn)
   app.post('/api/moderate/:action', async (req, res) => {
     const { action } = req.params;
     const { userId, reason, duration, moderator, reporterId, reportId } = req.body;
@@ -448,6 +661,11 @@ function setupModerationRoutes(app, client) {
     const guildId = client.guilds.cache.first()?.id;
 
     if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+    // Validate action - only allow ban, mute, warn
+    if (!['ban', 'mute', 'warn'].includes(action)) {
+      return res.status(400).json({ error: 'Invalid action. Allowed actions: ban, mute, warn' });
+    }
 
     try {
       const guild = client.guilds.cache.get(req.body.guildId || guildId);
@@ -468,80 +686,61 @@ function setupModerationRoutes(app, client) {
         }
       }
 
-      let actionLabel = action;
-      const config = require('../../config').getConfig();
+      const moderatorUser = moderator || 'Dashboard';
+      const isPermanent = duration === 'permanent';
+      
+      // Get report info for embeds
+      const reportInfo = await getReportInfo(reportId);
+      
+      // Fetch reporter name for embeds
+      let reporterName = 'Desconhecido';
+      if (reportInfo?.reporter_id || reporterId) {
+        try {
+          const reporter = await client.users.fetch(reportInfo?.reporter_id || reporterId);
+          reporterName = reporter.username;
+        } catch (e) {
+          reporterName = 'Desconhecido';
+        }
+      }
       
       switch (action) {
-        case 'kick':
-          if (!member) return res.status(400).json({ error: 'Member not in guild' });
-          await member.kick(reason || 'Kicked via Dashboard');
-          break;
         case 'ban':
+          // Send DM BEFORE ban
+          await sendBanDM(user, guild, reason || 'Não informado', duration, isPermanent, moderatorUser, reportInfo, reporterName);
+          
+          // Apply ban
           await guild.members.ban(userId, { reason: reason || 'Banned via Dashboard' });
+          
+          // Send embed to punishment channel
+          await sendBanEmbed(guild, user, moderatorUser, reason, duration, isPermanent, reportId, reporterId);
           break;
+          
         case 'mute':
           if (!member) return res.status(400).json({ error: 'Member not in guild' });
+          
+          // Apply timeout
           await member.timeout(duration ? ms(duration) : ms('10m'), reason || 'Muted via Dashboard');
+          
+          // Send embed to punishment channel
+          await sendMuteEmbed(guild, user, moderatorUser, reason, duration, reportId, reporterId);
           break;
+          
         case 'warn':
-          try {
-            const { EmbedBuilder } = require('discord.js');
-            const warnEmbed = new EmbedBuilder()
-              .setTitle('⚠️ Advertência Recebida')
-              .setDescription(`Você recebeu uma advertência no servidor **${guild.name}**.`)
-              .addFields(
-                { name: 'Motivo', value: reason || 'Não informado' },
-                { name: 'Moderador', value: moderator || 'Dashboard' }
-              )
-              .setColor('#ffff00')
-              .setTimestamp();
-            await user.send({ embeds: [warnEmbed] });
-          } catch (e) {
-            console.error(`Não foi possível enviar DM para ${user.tag}`);
-          }
+          // NO DM for warnings
+          // Just log and send embed to punishment channel
+          await sendWarnEmbed(guild, user, moderatorUser, reason, reportId, reporterId);
           break;
-        case 'innocent':
-          // No action needed for Discord user, just database log and report resolution
-          actionLabel = 'innocent';
-          break;
-        default:
-          return res.status(400).json({ error: 'Invalid action' });
       }
 
-      await addLog(userId, actionLabel, reason || 'Action via Dashboard', moderator || 'Dashboard', 'Administrativa', duration);
+      await addLog(userId, action, reason || 'Action via Dashboard', moderatorUser, 'Administrativa', duration);
       
       // Update report status if reportId is provided
       if (reportId) {
-        if (action === 'innocent') {
-          await pool.query("UPDATE reports SET status = 'rejected', rejected_at = CURRENT_TIMESTAMP WHERE id = $1", [reportId]);
-        } else {
-          await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [reportId]);
-        }
+        await pool.query("UPDATE reports SET status = 'resolved' WHERE id = $1", [reportId]);
       }
 
-      // Log to standard channel (Only for punishments)
-      if (action !== 'innocent') {
-        await logToChannel(guild, actionLabel, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderator || 'Dashboard'}`);
-
-        // Log to Punishments Channel (Skip if action is warn)
-        if (action !== 'warn' && config.punishmentChannel && config.customEmbeds?.punishment?.enabled) {
-          const punChannel = guild.channels.cache.get(config.punishmentChannel);
-          if (punChannel) {
-            const embed = createCustomEmbed(config.customEmbeds.punishment, {
-              action: actionLabel,
-              user_tag: user.tag,
-              user_id: userId,
-              moderator: moderator || 'Dashboard',
-              reason: reason || 'Não informado',
-              duration: duration || 'N/A',
-              reporter_id: reporterId || 'N/A'
-            });
-
-            if (evidenceUrl) embed.setImage(evidenceUrl);
-            await punChannel.send({ embeds: [embed] });
-          }
-        }
-      }
+      // Log to standard channel
+      await logToChannel(guild, action, `User: ${user.tag}\nReason: ${reason || 'No reason'}\nModerator: ${moderatorUser}`);
 
       res.json({ success: true });
     } catch (err) {
