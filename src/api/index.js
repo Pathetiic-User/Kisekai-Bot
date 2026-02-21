@@ -50,11 +50,6 @@ const limiter = rateLimit({
   message: { error: 'Muitas requisições, tente novamente mais tarde.' }
 });
 
-// Health check (before auth)
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
 // Apply auth middleware to all API routes
 app.use('/api/', limiter, authMiddleware);
 

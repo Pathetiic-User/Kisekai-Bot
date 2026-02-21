@@ -220,20 +220,50 @@ app.get('/api/logs', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
+// Criar servidor HTTP e iniciar IMEDIATAMENTE para healthcheck do Railway
+const server = http.createServer(app);
+
+// Variável para controlar se a aplicação está totalmente pronta
+let isAppReady = false;
+
+// Iniciar servidor PRIMEIRO (para responder ao healthcheck)
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// Atualizar health check para indicar status completo da aplicação
+app.get('/health', (req, res) => {
+  if (isAppReady) {
+    res.status(200).json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      db: 'connected',
+      discord: client.isReady ? client.isReady() : false
+    });
+  } else {
+    res.status(200).json({ 
+      status: 'initializing', 
+      timestamp: new Date().toISOString(),
+      db: 'connecting',
+      discord: false
+    });
+  }
+});
+
+// Inicializar banco de dados e Discord DEPOIS que o servidor estiver ouvindo
 config.initDb().then(() => {
   return config.loadConfig();
 }).then(() => {
-  // Criar servidor HTTP
-  const server = http.createServer(app);
-  
-  // Iniciar servidor
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  console.log('Database initialized successfully');
   
   // Login do Discord bot
-  client.login(process.env.DISCORD_TOKEN);
+  return client.login(process.env.DISCORD_TOKEN);
+}).then(() => {
+  console.log('Discord bot logged in successfully');
+  isAppReady = true;
 }).catch(err => {
   console.error('Failed to initialize:', err);
-  process.exit(1);
+  // Não fazer exit(1) para permitir que o healthcheck ainda funcione
+  // e o Railway possa tentar novamente
+  isAppReady = false;
 });
