@@ -1,4 +1,4 @@
-const { AUTHORIZED_GUILD_ID, pool } = require('../../config');
+mconst { AUTHORIZED_GUILD_ID, pool } = require('../../config');
 const { addLog, createCustomEmbed, uploadToSupabase, logToChannel } = require('../../utils');
 const ms = require('ms');
 
@@ -10,13 +10,45 @@ function setupModerationRoutes(app, client) {
       if (!guild) return res.status(404).json({ error: 'Guild not found' });
 
       const bans = await guild.bans.fetch();
-      const formattedBans = bans.map(b => ({
-        type: 'ban',
-        userId: b.user.id,
-        username: b.user.username,
-        reason: b.reason,
-        avatarURL: b.user.displayAvatarURL()
-      }));
+      
+      // Get ban durations from database
+      const banDurations = {};
+      for (const ban of bans.values()) {
+        const logResult = await pool.query(
+          "SELECT duration, timestamp FROM logs WHERE user_id = $1 AND action ILIKE 'ban%' ORDER BY timestamp DESC LIMIT 1",
+          [ban.user.id]
+        );
+        if (logResult.rows.length > 0) {
+          banDurations[ban.user.id] = {
+            duration: logResult.rows[0].duration,
+            timestamp: logResult.rows[0].timestamp
+          };
+        }
+      }
+      
+      const formattedBans = bans.map(b => {
+        const banInfo = banDurations[b.user.id] || {};
+        let endsAt = null;
+        
+        // Calculate end time if duration is set and not permanent
+        if (banInfo.duration && banInfo.timestamp && banInfo.duration !== 'permanent') {
+          const durationMs = ms(banInfo.duration);
+          if (durationMs) {
+            endsAt = new Date(new Date(banInfo.timestamp).getTime() + durationMs);
+          }
+        }
+        
+        return {
+          type: 'ban',
+          userId: b.user.id,
+          username: b.user.username,
+          reason: b.reason || banInfo.duration ? `Ban ${banInfo.duration === 'permanent' ? 'Permanente' : banInfo.duration}` : null,
+          avatarURL: b.user.displayAvatarURL(),
+          duration: banInfo.duration || null,
+          timestamp: banInfo.timestamp || null,
+          endsAt: endsAt
+        };
+      });
 
       // For mutes, we need to fetch all members and check for communicationDisabledUntil
       const members = await guild.members.fetch();
@@ -81,12 +113,19 @@ function setupModerationRoutes(app, client) {
     }
   });
 
-  // Unban user
+  // Unban user (Owner only)
   app.post('/api/moderation/unban', async (req, res) => {
     const { userId } = req.body;
+    const requesterId = req.user?.id;
+    
     try {
       const guild = client.guilds.cache.get(AUTHORIZED_GUILD_ID);
       if (!guild) return res.status(404).json({ error: 'Guild not found' });
+
+      // Check if requester is the guild owner
+      if (!requesterId || requesterId !== guild.ownerId) {
+        return res.status(403).json({ error: 'Apenas o dono do servidor pode desbanir usuários.' });
+      }
 
       await guild.members.unban(userId);
       res.json({ success: true, message: 'Usuário desbanido' });
