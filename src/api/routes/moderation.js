@@ -359,8 +359,9 @@ function setupModerationRoutes(app, client) {
     try {
       const guild = client.guilds.cache.get(AUTHORIZED_GUILD_ID);
       
+      // Get all logs for the user, not just 'Administrativa' type
       const result = await pool.query(
-        "SELECT * FROM logs WHERE user_id = $1 AND type = 'Administrativa' AND action != 'innocent' ORDER BY timestamp DESC", 
+        "SELECT * FROM logs WHERE user_id = $1 ORDER BY timestamp DESC", 
         [userId]
       );
       
