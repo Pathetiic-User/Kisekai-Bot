@@ -2,6 +2,67 @@ const { AUTHORIZED_GUILD_ID, DASHBOARD_ROLE_ID, pool, supabase } = require('../.
 const { addLog, createCustomEmbed, uploadToSupabase } = require('../../utils');
 const ms = require('ms');
 
+// Allowed image MIME types
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+// Extract image dimensions from buffer (without external libraries)
+function getImageDimensions(buffer, mimeType) {
+  try {
+    if (mimeType === 'image/png') {
+      // PNG: width and height are at bytes 16-24
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      return { width, height };
+    } else if (mimeType === 'image/jpeg') {
+      // JPEG: need to parse markers
+      let offset = 2;
+      while (offset < buffer.length) {
+        if (buffer[offset] !== 0xFF) break;
+        const marker = buffer[offset + 1];
+        if (marker === 0xC0 || marker === 0xC2) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          return { width, height };
+        }
+        const length = buffer.readUInt16BE(offset + 2);
+        offset += 2 + length;
+      }
+    } else if (mimeType === 'image/gif') {
+      // GIF: width and height are at bytes 6-10
+      const width = buffer.readUInt16LE(6);
+      const height = buffer.readUInt16LE(8);
+      return { width, height };
+    } else if (mimeType === 'image/webp') {
+      // WebP: more complex, check for VP8/VP8L/VP8X
+      const riff = buffer.toString('ascii', 0, 4);
+      if (riff === 'RIFF') {
+        const webp = buffer.toString('ascii', 8, 12);
+        if (webp === 'WEBP') {
+          const chunk = buffer.toString('ascii', 12, 16);
+          if (chunk === 'VP8 ') {
+            const width = (buffer.readUInt16LE(26) & 0x3FFF);
+            const height = (buffer.readUInt16LE(28) & 0x3FFF);
+            return { width, height };
+          } else if (chunk === 'VP8L') {
+            const bits = buffer.readUInt32LE(21);
+            const width = (bits & 0x3FFF) + 1;
+            const height = ((bits >> 14) & 0x3FFF) + 1;
+            return { width, height };
+          } else if (chunk === 'VP8X') {
+            // readUInt24LE is not a native Buffer method, implement manually
+            const width = (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16)) + 1;
+            const height = (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16)) + 1;
+            return { width, height };
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error extracting image dimensions:', e);
+  }
+  return { width: null, height: null };
+}
+
 function setupReportRoutes(app, client, upload) {
   // Get all reports
   app.get('/api/reports', async (req, res) => {
@@ -57,11 +118,33 @@ function setupReportRoutes(app, client, upload) {
     try {
       let imageUrl = null;
       let storagePath = null;
+      let fileName = null;
+      let fileSize = null;
+      let fileWidth = null;
+      let fileHeight = null;
+      let fileType = null;
 
       if (req.file) {
-        const fileExt = req.file.originalname.split('.').pop();
-        const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-        const uploadResult = await uploadToSupabase(req.file.buffer, fileName, req.file.mimetype);
+        // Validate file type - only images allowed
+        if (!ALLOWED_IMAGE_TYPES.includes(req.file.mimetype)) {
+          return res.status(400).json({ 
+            error: 'Tipo de arquivo não permitido. Apenas imagens (JPEG, PNG, GIF, WebP) são aceitas.' 
+          });
+        }
+
+        // Extract image dimensions
+        const dimensions = getImageDimensions(req.file.buffer, req.file.mimetype);
+        
+        // Extract original file name and metadata
+        fileName = req.file.originalname || 'imagem.png';
+        fileSize = req.file.size;
+        fileWidth = dimensions.width;
+        fileHeight = dimensions.height;
+        fileType = req.file.mimetype;
+
+        const fileExt = fileName.split('.').pop();
+        const storageFileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+        const uploadResult = await uploadToSupabase(req.file.buffer, storageFileName, req.file.mimetype);
         
         if (uploadResult) {
           imageUrl = uploadResult.publicUrl;
@@ -70,8 +153,9 @@ function setupReportRoutes(app, client, upload) {
       }
 
       const result = await pool.query(
-        'INSERT INTO reports (reporter_id, reported_id, reason, image_url, storage_path) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        [reporterId, reportedUserId, reason, imageUrl, storagePath]
+        `INSERT INTO reports (reporter_id, reported_id, reason, image_url, storage_path, file_name, file_size, file_width, file_height, file_type) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [reporterId, reportedUserId, reason, imageUrl, storagePath, fileName, fileSize, fileWidth, fileHeight, fileType]
       );
 
       res.json({ success: true, report: result.rows[0] });

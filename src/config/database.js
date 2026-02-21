@@ -131,6 +131,21 @@ async function initDb() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='rejected_at') THEN
           ALTER TABLE reports ADD COLUMN rejected_at TIMESTAMPTZ;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='file_name') THEN
+          ALTER TABLE reports ADD COLUMN file_name TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='file_size') THEN
+          ALTER TABLE reports ADD COLUMN file_size INTEGER;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='file_width') THEN
+          ALTER TABLE reports ADD COLUMN file_width INTEGER;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='file_height') THEN
+          ALTER TABLE reports ADD COLUMN file_height INTEGER;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='reports' AND column_name='file_type') THEN
+          ALTER TABLE reports ADD COLUMN file_type TEXT;
+        END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='logs' AND column_name='duration') THEN
           ALTER TABLE logs ADD COLUMN duration TEXT;
         END IF;
