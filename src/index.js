@@ -25,6 +25,7 @@ const setupSweepstakeRoutes = require('./api/routes/sweepstakes');
 const setupTemplateRoutes = require('./api/routes/templates');
 const setupAccessRoutes = require('./api/routes/access');
 const setupBroadcastRoutes = require('./api/routes/broadcast');
+const setupBugReportRoutes = require('./api/routes/bugReports');
 
 // Importar utilitários
 const { getCachedDiscordUserSummary } = require('./utils');
@@ -43,6 +44,7 @@ setupSweepstakeRoutes(app, client);
 setupTemplateRoutes(app, client);
 setupAccessRoutes(app, client);
 setupBroadcastRoutes(app, client);
+setupBugReportRoutes(app, client);
 
 // ==================== ROTAS BÁSICAS ====================
 

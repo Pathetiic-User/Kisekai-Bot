@@ -101,6 +101,15 @@ async function initDb() {
         registered_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(sweepstake_id, user_id)
       );
+      CREATE TABLE IF NOT EXISTS bug_reports (
+        id SERIAL PRIMARY KEY,
+        reporter_id TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        description TEXT NOT NULL,
+        allow_contact BOOLEAN DEFAULT FALSE,
+        status TEXT DEFAULT 'pending',
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
 
       -- Migration for existing tables
       DO $$ 
