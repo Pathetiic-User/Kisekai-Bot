@@ -64,8 +64,34 @@ function getConfig() {
   return config;
 }
 
+// Deep merge function for nested objects
+function deepMerge(target, source) {
+  const output = { ...target };
+  
+  for (const key in source) {
+    if (source.hasOwnProperty(key)) {
+      if (
+        source[key] && 
+        typeof source[key] === 'object' && 
+        !Array.isArray(source[key]) &&
+        target[key] && 
+        typeof target[key] === 'object' &&
+        !Array.isArray(target[key])
+      ) {
+        // Recursively merge nested objects
+        output[key] = deepMerge(target[key], source[key]);
+      } else {
+        // Directly assign non-object values or arrays
+        output[key] = source[key];
+      }
+    }
+  }
+  
+  return output;
+}
+
 function setConfig(newConfig) {
-  config = { ...config, ...newConfig };
+  config = deepMerge(config, newConfig);
 }
 
 module.exports = {
